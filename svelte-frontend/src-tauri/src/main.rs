@@ -310,6 +310,186 @@ fn start_spotify_oauth(
 		.map_err(|error| error.to_string())
 }
 
+const SPOTIFY_CALLBACK_URI: &str = "http://127.0.0.1:43821/callback";
+
+fn is_spotify_pkce_value(value: &str) -> bool {
+	(43..=128).contains(&value.len())
+		&& value
+			.bytes()
+			.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+}
+
+#[tauri::command]
+fn start_spotify_pkce_oauth(
+	app: AppHandle,
+	window: WebviewWindow,
+	client_id: String,
+	code_challenge: String,
+	state: String,
+) -> Result<(), String> {
+	if window.label() != "player" {
+		return Err("This command is only available to the player window.".into());
+	}
+	let client_id = client_id.trim();
+	if !(16..=64).contains(&client_id.len())
+		|| !client_id.bytes().all(|byte| byte.is_ascii_alphanumeric())
+	{
+		return Err("Enter a valid Spotify Client ID in Settings.".into());
+	}
+	if !is_spotify_pkce_value(&code_challenge) || !is_spotify_pkce_value(&state) {
+		return Err("Spotify sign-in could not be started securely.".into());
+	}
+
+	let listener = TcpListener::bind("127.0.0.1:43821")
+		.map_err(|_| "Spotify sign-in callback port 43821 is unavailable.".to_string())?;
+	listener
+		.set_nonblocking(true)
+		.map_err(|error| error.to_string())?;
+
+	let mut login_url = Url::parse("https://accounts.spotify.com/authorize")
+		.map_err(|error| error.to_string())?;
+	login_url
+		.query_pairs_mut()
+		.append_pair("client_id", client_id)
+		.append_pair("response_type", "code")
+		.append_pair("redirect_uri", SPOTIFY_CALLBACK_URI)
+		.append_pair(
+			"scope",
+			"user-read-private user-read-email user-library-read user-library-modify playlist-read-private playlist-read-collaborative playlist-modify-public playlist-modify-private",
+		)
+		.append_pair("code_challenge_method", "S256")
+		.append_pair("code_challenge", &code_challenge)
+		.append_pair("state", &state);
+
+	app.opener()
+		.open_url(login_url.as_str(), None::<&str>)
+		.map_err(|error| error.to_string())?;
+
+	let callback_app = app.clone();
+	let expected_state = state;
+	thread::spawn(move || {
+		let deadline = Instant::now() + Duration::from_secs(600);
+		while Instant::now() < deadline {
+			match listener.accept() {
+				Ok((mut stream, _)) => {
+					let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+					let mut request = String::new();
+					let _ = io::BufReader::new(&stream).read_line(&mut request);
+					let callback = request
+						.split_whitespace()
+						.nth(1)
+						.and_then(|path| Url::parse(&format!("http://localhost{path}")).ok());
+					if callback
+						.as_ref()
+						.map_or(true, |url| url.path() != "/callback")
+					{
+						continue;
+					}
+					let callback_state = callback.as_ref().and_then(|url| {
+						url.query_pairs()
+							.find(|(key, _)| key == "state")
+							.map(|(_, value)| value.into_owned())
+					});
+					if callback_state.as_deref() != Some(expected_state.as_str()) {
+						let body = "Spotify sign-in state did not match. Return to Wavelength and try again.";
+						let response = format!(
+							"HTTP/1.1 400 Bad Request\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+							body.len(),
+							body
+						);
+						let _ = stream.write_all(response.as_bytes());
+						continue;
+					}
+
+					let code = callback.as_ref().and_then(|url| {
+						url.query_pairs()
+							.find(|(key, _)| key == "code")
+							.map(|(_, value)| value.into_owned())
+					});
+					let error = callback.as_ref().and_then(|url| {
+						url.query_pairs()
+							.find(|(key, _)| key == "error")
+							.map(|(_, value)| value.into_owned())
+					});
+					let body_text;
+					if let Some(code) = code.filter(|code| !code.is_empty() && code.len() <= 4096) {
+						let _ = callback_app.emit(
+							"spotify-oauth-result",
+							serde_json::json!({
+								"status": "authorized",
+								"code": code,
+								"redirectUri": SPOTIFY_CALLBACK_URI,
+							}),
+						);
+						body_text = "Spotify sign-in is complete. You can return to Wavelength.";
+					} else if error.is_some() {
+						let _ = callback_app.emit(
+							"spotify-oauth-result",
+							serde_json::json!({"status": "error"}),
+						);
+						body_text = "Spotify sign-in was not completed. You can return to Wavelength.";
+					} else {
+						continue;
+					}
+
+					let body = format!(
+						"<!doctype html><meta charset=\"utf-8\"><title>Wavelength</title><p>{body_text}</p>"
+					);
+					let response = format!(
+						"HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+						body.len(),
+						body
+					);
+					let _ = stream.write_all(response.as_bytes());
+					return;
+				}
+				Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+					thread::sleep(Duration::from_millis(100));
+				}
+				Err(_) => return,
+			}
+		}
+	});
+
+	Ok(())
+}
+
+#[tauri::command]
+fn get_spotify_refresh_token(window: WebviewWindow) -> Result<Option<String>, String> {
+	if window.label() != "player" {
+		return Err("This command is only available to the player window.".into());
+	}
+	let entry = keyring::Entry::new("com.wavelength.desktop", "spotify-refresh-token")
+		.map_err(|error| error.to_string())?;
+	match entry.get_password() {
+		Ok(token) => Ok(Some(token)),
+		Err(keyring::Error::NoEntry) => Ok(None),
+		Err(error) => Err(error.to_string()),
+	}
+}
+
+#[tauri::command]
+fn set_spotify_refresh_token(
+	window: WebviewWindow,
+	refresh_token: Option<String>,
+) -> Result<(), String> {
+	if window.label() != "player" {
+		return Err("This command is only available to the player window.".into());
+	}
+	let entry = keyring::Entry::new("com.wavelength.desktop", "spotify-refresh-token")
+		.map_err(|error| error.to_string())?;
+	match refresh_token {
+		Some(token) if !token.is_empty() && token.len() <= 4096 => {
+			entry.set_password(&token).map_err(|error| error.to_string())
+		}
+		Some(_) => Err("The Spotify refresh token is invalid.".into()),
+		None => match entry.delete_credential() {
+			Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+			Err(error) => Err(error.to_string()),
+		},
+	}
+}
+
 fn start_bundled_service(
 	app: &tauri::App,
 	service_path: &str,
@@ -394,6 +574,21 @@ fn configure_webview_hardware_acceleration() {
 fn main() {
 	configure_webview_hardware_acceleration();
 	tauri::Builder::default()
+		.plugin(
+			tauri::plugin::Builder::<tauri::Wry, ()>::new("webview-navigation-guard")
+				.on_navigation(|_, url| {
+					let packaged_app = (url.scheme() == "tauri"
+						&& url.host_str() == Some("localhost"))
+						|| (matches!(url.scheme(), "http" | "https")
+							&& url.host_str() == Some("tauri.localhost"));
+					let dev_server = cfg!(debug_assertions)
+						&& url.scheme() == "http"
+						&& matches!(url.host_str(), Some("localhost" | "127.0.0.1"))
+						&& url.port() == Some(5173);
+					packaged_app || dev_server
+				})
+				.build(),
+		)
 		.setup(|app| {
 			let resource_dir = app.path().resource_dir()?;
 			let runtime_dir = resource_dir.join("services").join("runtime");
@@ -468,7 +663,10 @@ fn main() {
 			set_download_directory,
 			choose_download_directory,
 			download_audio,
-			start_spotify_oauth
+			start_spotify_oauth,
+			start_spotify_pkce_oauth,
+			get_spotify_refresh_token,
+			set_spotify_refresh_token
 		])
 		.build(tauri::generate_context!())
 		.expect("error while building Wavelength")
@@ -488,7 +686,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-	use super::normalize_server_url;
+	use super::{is_spotify_pkce_value, normalize_server_url};
 
 	#[test]
 	fn server_url_allows_https_and_loopback_http_only() {
@@ -504,5 +702,14 @@ mod tests {
 		assert!(normalize_server_url("https://user:pass@music.example.com").is_err());
 		assert!(normalize_server_url("https://music.example.com/player").is_err());
 		assert!(normalize_server_url("file:///tmp/app").is_err());
+	}
+
+	#[test]
+	fn spotify_pkce_values_require_base64url_characters_and_length() {
+		assert!(is_spotify_pkce_value(&"A".repeat(43)));
+		assert!(is_spotify_pkce_value(&"A".repeat(128)));
+		assert!(!is_spotify_pkce_value(&"A".repeat(42)));
+		assert!(!is_spotify_pkce_value(&"A".repeat(129)));
+		assert!(!is_spotify_pkce_value(&format!("{}+", "A".repeat(43))));
 	}
 }

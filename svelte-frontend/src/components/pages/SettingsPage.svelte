@@ -3,6 +3,7 @@
 
     export let spotifyConnected = false;
     export let spotifyProfile = null;
+    export let spotifyClientId = "";
     export let downloadDirectoryName = "";
     export let tauriAvailable = false;
     export let appUpdateChecking = false;
@@ -19,6 +20,7 @@
     export let mobileViewport = false;
     export let onDisconnectSpotify;
     export let onConnectSpotify;
+    export let onSaveSpotifyClientId;
     export let onOpenFolderManager;
     export let onChooseDownloadDirectory;
     export let onNavigate;
@@ -45,6 +47,26 @@
                     : onConnectSpotify}
                 >{spotifyConnected ? "Disconnect" : "Connect"}</button
             >
+        </div>
+        <div class="settings-row spotify-client-id-row">
+            <div class="settings-row-copy">
+                <strong>Spotify Client ID</strong>
+                <small
+                    >Use a Spotify Developer app ID; no client secret is needed.
+                    Add http://127.0.0.1:43821/callback as a Redirect URI.
+                    Web apps also need their exact app URL.</small
+                >
+            </div>
+            <input
+                class="room-server-input spotify-client-id-input"
+                type="text"
+                bind:value={spotifyClientId}
+                on:change={onSaveSpotifyClientId}
+                placeholder="Spotify Client ID"
+                aria-label="Spotify Client ID"
+                autocomplete="off"
+                maxlength="64"
+            />
         </div>
         <div class="settings-row">
             <div class="settings-row-copy">

@@ -1,6 +1,7 @@
 <script>
   import { onMount, tick } from "svelte";
   import { invoke, isTauri } from "@tauri-apps/api/core";
+  import { listen } from "@tauri-apps/api/event";
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import brandMark from "../src-tauri/icons/128x128.png";
   import { relaunch } from "@tauri-apps/plugin-process";
@@ -279,6 +280,10 @@
   );
   let appTheme = localStorage.getItem("wavelength-theme") || "dark";
   let appAccent = localStorage.getItem("wavelength-accent") || "#d7c7a4";
+  let appBackgroundColor = (() => {
+    const saved = localStorage.getItem("wavelength-background-color") || "";
+    return /^#[a-f\d]{6}$/i.test(saved) ? saved : "";
+  })();
   let customAccentInput = appAccent;
   let customAccentError = "";
   let systemThemeMedia = null;
@@ -465,7 +470,7 @@
       );
       if (Array.isArray(saved) && saved.length === equalizerBands.length)
         return saved.map((gain) =>
-          Math.max(-12, Math.min(12, Number(gain) || 0)),
+          Math.max(-18, Math.min(18, Number(gain) || 0)),
         );
     } catch {}
     return [...builtInEqualizerPresets[0].gains];
@@ -597,11 +602,18 @@
     localStorage.getItem("wavelength-play-events") || "[]",
   );
   let statsPeriod = "all";
+  let spotifyClientId =
+    localStorage.getItem("wavelength-spotify-client-id") || "";
   let spotifyConnected =
     localStorage.getItem("wavelength-spotify-connected") === "true";
   let spotifyProfile = null;
   let spotifyPlaylists = [];
   let spotifySavedTracks = [];
+  let spotifyAccessToken = "";
+  let spotifyAccessTokenExpiresAt = 0;
+  let spotifyRefreshToken = "";
+  let spotifyRefreshPromise = null;
+  let pendingSpotifyOAuth = null;
   let selectedCollectionId = "";
   let shuffleOn = false;
   let repeatMode = "off";
@@ -1581,21 +1593,22 @@
     );
   }
 
-  function applyEqualizerGains() {
+  function applyEqualizerGains({ immediate = false } = {}) {
     equalizerFilters.forEach((filter, index) => {
       const currentTime = equalizerContext.currentTime;
       filter.type = equalizerTypes[index] || "peaking";
-      filter.frequency.setTargetAtTime(
-        equalizerFrequencies[index] || equalizerBands[index],
-        currentTime,
-        0.015,
-      );
-      filter.Q.setTargetAtTime(equalizerQs[index] || 1.1, currentTime, 0.015);
-      filter.gain.setTargetAtTime(
-        equalizerGains[index] || 0,
-        currentTime,
-        0.015,
-      );
+      [
+        [filter.frequency, equalizerFrequencies[index] || equalizerBands[index]],
+        [filter.Q, equalizerQs[index] || 1.1],
+        [filter.gain, equalizerGains[index] || 0],
+      ].forEach(([parameter, value]) => {
+        if (immediate) {
+          parameter.cancelScheduledValues(currentTime);
+          parameter.setValueAtTime(value, currentTime);
+        } else {
+          parameter.setTargetAtTime(value, currentTime, 0.015);
+        }
+      });
     });
     drawEqualizerSpectrum();
   }
@@ -1629,7 +1642,7 @@
           )
         : equalizerBands.map(() => "peaking");
     persistEqualizerSettings();
-    applyEqualizerGains();
+    applyEqualizerGains({ immediate: true });
   }
 
   function setEqualizerGain(index, event) {
@@ -1687,7 +1700,7 @@
     );
     activeEqualizerPresetId = "custom";
     persistEqualizerSettings();
-    applyEqualizerGains();
+    applyEqualizerGains({ immediate: true });
   }
 
   function resetEqualizer() {
@@ -1697,7 +1710,7 @@
     equalizerTypes = equalizerBands.map(() => "peaking");
     activeEqualizerPresetId = "flat";
     persistEqualizerSettings();
-    applyEqualizerGains();
+    applyEqualizerGains({ immediate: true });
   }
 
   function equalizerPlotBounds(bounds) {
@@ -2080,8 +2093,59 @@
         ?.map((channel) => parseInt(channel, 16))
         .join(", ") || "215, 199, 164",
     );
+    if (appBackgroundColor) {
+      const channels = appBackgroundColor
+        .slice(1)
+        .match(/.{2}/g)
+        .map((channel) => parseInt(channel, 16) / 255)
+        .map((channel) =>
+          channel <= 0.04045
+            ? channel / 12.92
+            : ((channel + 0.055) / 1.055) ** 2.4,
+        );
+      const luminance =
+        channels[0] * 0.2126 + channels[1] * 0.7152 + channels[2] * 0.0722;
+      const lightBackground = luminance > 0.179;
+      const foreground = lightBackground ? "#1c2019" : "#edf0e8";
+      const panelTint = lightBackground ? "#000000" : "#ffffff";
+      root.style.setProperty("--surface-page", appBackgroundColor);
+      root.style.setProperty(
+        "--panel",
+        `color-mix(in srgb, ${appBackgroundColor} 92%, ${panelTint})`,
+      );
+      root.style.setProperty(
+        "--panel-hi",
+        `color-mix(in srgb, ${appBackgroundColor} 84%, ${panelTint})`,
+      );
+      root.style.setProperty("--ink", foreground);
+      root.style.setProperty(
+        "--muted",
+        `color-mix(in srgb, ${foreground} 82%, ${appBackgroundColor})`,
+      );
+      root.style.setProperty(
+        "--quiet",
+        `color-mix(in srgb, ${foreground} 62%, ${appBackgroundColor})`,
+      );
+      root.style.setProperty(
+        "--line",
+        `color-mix(in srgb, ${foreground} 16%, transparent)`,
+      );
+    } else {
+      [
+        "--surface-page",
+        "--panel",
+        "--panel-hi",
+        "--ink",
+        "--muted",
+        "--quiet",
+        "--line",
+      ].forEach((property) => root.style.removeProperty(property));
+    }
     localStorage.setItem("wavelength-theme", appTheme);
     localStorage.setItem("wavelength-accent", appAccent);
+    if (appBackgroundColor)
+      localStorage.setItem("wavelength-background-color", appBackgroundColor);
+    else localStorage.removeItem("wavelength-background-color");
     localStorage.setItem("wavelength-resolved-accent", safeAccent);
   }
 
@@ -2121,6 +2185,11 @@
 
   function setAccent(accent) {
     appAccent = accent;
+    applyAppearance();
+  }
+
+  function setBackgroundColor(color) {
+    appBackgroundColor = color;
     applyAppearance();
   }
 
@@ -2266,12 +2335,57 @@
   }
 
   onMount(() => {
+    let mounted = true;
+    let unlistenSpotifyOAuth;
     systemThemeMedia = window.matchMedia("(prefers-color-scheme: dark)");
     applyAppearance();
     applyUiScale();
     loadDownloadDirectory();
     void restoreQobuzCredentials();
     if (isTauri()) {
+      void listen("spotify-oauth-result", async ({ payload }) => {
+        if (payload?.status === "error") {
+          pendingSpotifyOAuth = null;
+          notice = "Spotify sign-in was not completed.";
+          return;
+        }
+        try {
+          let profile;
+          if (
+            payload?.status === "authorized" &&
+            typeof payload.code === "string" &&
+            pendingSpotifyOAuth
+          ) {
+            const flow = pendingSpotifyOAuth;
+            pendingSpotifyOAuth = null;
+            profile = await completeSpotifyOAuth(payload.code, flow);
+          } else if (
+            payload?.status === "connected" &&
+            typeof payload.ticket === "string"
+          ) {
+            await api("/spotify/desktop-exchange", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ ticket: payload.ticket }),
+            });
+            profile = await fetchSpotifyData(true);
+          } else {
+            pendingSpotifyOAuth = null;
+            throw new Error("Spotify sign-in returned an invalid response.");
+          }
+          if (profile && pendingInviteCode)
+            joinPartyAs(profile.display_name || profile.id, pendingInviteCode);
+        } catch (error) {
+          notice = error?.message || "Spotify sign-in could not be completed.";
+        }
+      })
+        .then((unlisten) => {
+          if (mounted) unlistenSpotifyOAuth = unlisten;
+          else unlisten();
+        })
+        .catch((error) => {
+          notice = error?.message || "Spotify sign-in could not be prepared.";
+        });
       appUpdateStartupTimer = window.setTimeout(
         () => checkForAppUpdates(true),
         10_000,
@@ -2444,10 +2558,12 @@
     const handleOutsideContextMenu = (event) => {
       if (!event.target.closest(".context-menu")) contextMenu = null;
     };
+    const preventNativeContextMenu = (event) => event.preventDefault();
     window.addEventListener("popstate", handleNavigation);
     window.addEventListener("click", handleOutsideContextMenu);
     window.addEventListener("keydown", handleLyricsKeydown);
     window.addEventListener("keydown", handleUiScaleShortcut);
+    document.addEventListener("contextmenu", preventNativeContextMenu);
     const librariesReady = Promise.all([loadLibrary(), loadSavedFolders()]);
     librariesReady.then(restoreLastPlayback);
     roomServerReady.then(async () => {
@@ -2504,7 +2620,21 @@
       if (spotifyResult === "error")
         notice = "Spotify sign-in was not completed.";
     }
-    if (spotifyConnected || spotifyResult === "connected") {
+    const spotifyCallbackParams = new URLSearchParams(window.location.search);
+    if (
+      !isTauri() &&
+      spotifyCallbackParams.has("state") &&
+      (spotifyCallbackParams.has("code") ||
+        spotifyCallbackParams.has("error"))
+    ) {
+      void completeSpotifyWebRedirect().catch((error) => {
+        notice = error?.message || "Spotify sign-in could not be completed.";
+      });
+    } else if (spotifyClientId) {
+      void restoreStandaloneSpotifySession().catch((error) => {
+        notice = error?.message || "Spotify could not be restored.";
+      });
+    } else if (spotifyConnected || spotifyResult === "connected") {
       roomServerReady
         .then(() => fetchSpotifyData(spotifyResult === "connected"))
         .then((profile) => {
@@ -2547,6 +2677,9 @@
       window.removeEventListener("keydown", handleLyricsKeydown);
       window.removeEventListener("keydown", handleUiScaleShortcut);
       window.removeEventListener("resize", handleViewportResize);
+      document.removeEventListener("contextmenu", preventNativeContextMenu);
+      mounted = false;
+      unlistenSpotifyOAuth?.();
       systemThemeMedia.removeEventListener?.("change", applyAppearance);
       if (appUpdateStartupTimer) clearTimeout(appUpdateStartupTimer);
       if (appUpdatePollingTimer) clearInterval(appUpdatePollingTimer);
@@ -2572,11 +2705,13 @@
     const roomRequest = path.startsWith("/parties");
     const spotifyRequest = path.startsWith("/spotify/");
     const localAudioRequest = isLocalPlayer() && path.startsWith("/audio/");
+    if (spotifyRequest && spotifyClientId)
+      return spotifyApiForAppPath(path, options);
     if (roomRequest && !roomServerUrl)
       throw new Error(
         "Set a room server URL in Settings to use shared listening.",
       );
-    if (spotifyRequest && isTauri() && !roomServerUrl)
+    if (spotifyRequest && isTauri() && !spotifyClientId && !roomServerUrl)
       throw new Error("Set a room server URL in Settings to use Spotify.");
     if (roomRequest && partyHostToken)
       headers.Authorization = `Bearer ${partyHostToken}`;
@@ -3023,6 +3158,377 @@
     notice = "";
   }
 
+  function randomSpotifyValue(length = 64) {
+    const characters =
+      "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+    const acceptanceLimit =
+      Math.floor(256 / characters.length) * characters.length;
+    let value = "";
+    while (value.length < length) {
+      const bytes = crypto.getRandomValues(
+        new Uint8Array(length - value.length),
+      );
+      for (const byte of bytes) {
+        if (byte < acceptanceLimit)
+          value += characters[byte % characters.length];
+        if (value.length === length) break;
+      }
+    }
+    return value;
+  }
+
+  function encodeBase64Url(bytes) {
+    return btoa(String.fromCharCode(...new Uint8Array(bytes)))
+      .replace(/=/g, "")
+      .replace(/\+/g, "-")
+      .replace(/\//g, "_");
+  }
+
+  async function createSpotifyPkceFlow() {
+    const verifier = randomSpotifyValue();
+    const digest = await crypto.subtle.digest(
+      "SHA-256",
+      new TextEncoder().encode(verifier),
+    );
+    return {
+      verifier,
+      challenge: encodeBase64Url(digest),
+      state: randomSpotifyValue(48),
+      clientId: spotifyClientId.trim(),
+      redirectUri: isTauri()
+        ? "http://127.0.0.1:43821/callback"
+        : `${window.location.origin}${window.location.pathname}`,
+    };
+  }
+
+  async function persistSpotifyRefreshToken(token) {
+    spotifyRefreshToken = token || "";
+    if (isTauri()) {
+      await invoke("set_spotify_refresh_token", {
+        refreshToken: spotifyRefreshToken || null,
+      });
+    } else if (spotifyRefreshToken) {
+      localStorage.setItem("wavelength-spotify-refresh-token", spotifyRefreshToken);
+    } else {
+      localStorage.removeItem("wavelength-spotify-refresh-token");
+    }
+  }
+
+  async function refreshSpotifyAccessToken() {
+    if (!spotifyRefreshToken)
+      throw new Error("Connect Spotify to load your Spotify library.");
+    if (spotifyRefreshPromise) return spotifyRefreshPromise;
+
+    const refreshToken = spotifyRefreshToken;
+    spotifyRefreshPromise = (async () => {
+      const response = await fetch("https://accounts.spotify.com/api/token", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded",
+        },
+        body: new URLSearchParams({
+          grant_type: "refresh_token",
+          refresh_token: refreshToken,
+          client_id: spotifyClientId.trim(),
+        }),
+      });
+      const data = await response.json();
+      if (!response.ok)
+        throw new Error(
+          data.error_description || data.error || "Spotify token refresh failed.",
+        );
+      if (typeof data.access_token !== "string")
+        throw new Error("Spotify returned an invalid access token.");
+
+      spotifyAccessToken = data.access_token;
+      spotifyAccessTokenExpiresAt =
+        Date.now() + Math.max(0, Number(data.expires_in) || 3600) * 1000;
+      if (typeof data.refresh_token === "string" && data.refresh_token)
+        await persistSpotifyRefreshToken(data.refresh_token);
+      return spotifyAccessToken;
+    })();
+
+    try {
+      return await spotifyRefreshPromise;
+    } finally {
+      spotifyRefreshPromise = null;
+    }
+  }
+
+  async function getSpotifyAccessToken() {
+    if (
+      spotifyAccessToken &&
+      spotifyAccessTokenExpiresAt > Date.now() + 60_000
+    )
+      return spotifyAccessToken;
+    return refreshSpotifyAccessToken();
+  }
+
+  async function spotifyApi(path, options = {}, retryUnauthorized = true) {
+    const accessToken = await getSpotifyAccessToken();
+    const headers = {
+      Accept: "application/json",
+      Authorization: `Bearer ${accessToken}`,
+      ...(options.body ? { "Content-Type": "application/json" } : {}),
+      ...(options.headers || {}),
+    };
+    const url = path.startsWith("https://")
+      ? path
+      : `https://api.spotify.com/v1${path}`;
+    const response = await fetch(url, { ...options, headers });
+    if (response.status === 401 && retryUnauthorized) {
+      spotifyAccessTokenExpiresAt = 0;
+      await getSpotifyAccessToken();
+      return spotifyApi(path, options, false);
+    }
+    const data = response.status === 204 ? {} : await response.json();
+    if (!response.ok)
+      throw Object.assign(
+        new Error(
+          data.error?.message ||
+            data.error_description ||
+            "Spotify request failed.",
+        ),
+        { status: response.status },
+      );
+    return data;
+  }
+
+  async function spotifyApiItems(path) {
+    const nextUrl = path.startsWith("https://")
+      ? new URL(path)
+      : new URL(`https://api.spotify.com/v1${path}`);
+    const items = [];
+    let pageUrl = nextUrl;
+    while (pageUrl) {
+      if (
+        pageUrl.origin !== "https://api.spotify.com" ||
+        !pageUrl.pathname.startsWith("/v1/")
+      )
+        throw new Error("Spotify returned an invalid pagination URL.");
+      const page = await spotifyApi(
+        `${pageUrl.pathname.slice(3)}${pageUrl.search}`,
+      );
+      if (Array.isArray(page.items)) items.push(...page.items);
+      pageUrl = page.next ? new URL(page.next) : null;
+    }
+    return items;
+  }
+
+  async function fetchSpotifyLibraryDirect() {
+    const [savedItems, playlists] = await Promise.all([
+      spotifyApiItems("/me/tracks?limit=50"),
+      spotifyApiItems("/me/playlists?limit=50"),
+    ]);
+    const playlistsWithTracks = [];
+    let unavailablePlaylistCount = 0;
+    for (let index = 0; index < playlists.length; index += 4) {
+      const batch = await Promise.all(
+        playlists.slice(index, index + 4).map(async (playlist) => {
+          try {
+            const items = await spotifyApiItems(
+              `/playlists/${encodeURIComponent(playlist.id)}/items?limit=50`,
+            );
+            return {
+              ...playlist,
+              spotifyId: playlist.id,
+              tracks: items
+                .map((item) => item.item || item.track)
+                .filter((track) => track && track.type !== "episode"),
+            };
+          } catch (error) {
+            if (error.status !== 403) throw error;
+            unavailablePlaylistCount += 1;
+            return { ...playlist, spotifyId: playlist.id, tracks: [] };
+          }
+        }),
+      );
+      playlistsWithTracks.push(...batch);
+    }
+    return {
+      savedTracks: savedItems.map((item) => item.track).filter(Boolean),
+      playlists: playlistsWithTracks,
+      unavailablePlaylistCount,
+    };
+  }
+
+  async function spotifyApiForAppPath(path, options = {}) {
+    const method = (options.method || "GET").toUpperCase();
+    if (path === "/spotify/me") return spotifyApi("/me");
+    if (path === "/spotify/library") return fetchSpotifyLibraryDirect();
+    if (path.startsWith("/spotify/search?")) {
+      const params = new URL(path, "https://wavelength.invalid").searchParams;
+      const searchParams = new URLSearchParams({
+        q: params.get("q") || "",
+        type: "track",
+        limit: params.get("limit") || "15",
+        offset: params.get("offset") || "0",
+      });
+      const results = await spotifyApi(
+        `/search?${searchParams}`,
+        options.signal ? { signal: options.signal } : {},
+      );
+      return { results: results.tracks?.items || [] };
+    }
+    if (path === "/spotify/playlists" && method === "POST") {
+      const input = JSON.parse(options.body || "{}");
+      const playlist = await spotifyApi("/me/playlists", {
+        method: "POST",
+        body: JSON.stringify({ name: input.name }),
+      });
+      return { id: playlist.id, spotifyId: playlist.id };
+    }
+    const playlistTracks = path.match(
+      /^\/spotify\/playlists\/([^/]+)\/tracks$/,
+    );
+    if (playlistTracks && method === "POST") {
+      const input = JSON.parse(options.body || "{}");
+      const id = decodeURIComponent(playlistTracks[1]);
+      if (!/^[A-Za-z0-9]+$/.test(id))
+        throw new Error("The Spotify playlist ID is invalid.");
+      return spotifyApi(`/playlists/${id}/items`, {
+        method: "POST",
+        body: JSON.stringify({ uris: input.trackIds || [] }),
+      });
+    }
+    if (path === "/spotify/saved-tracks" && ["PUT", "DELETE"].includes(method)) {
+      const input = JSON.parse(options.body || "{}");
+      const ids = (input.trackIds || [])
+        .map((id) => String(id).replace(/^spotify:track:/, ""))
+        .filter((id) => /^[A-Za-z0-9]+$/.test(id));
+      if (!ids.length) throw new Error("No Spotify tracks were provided.");
+      for (let index = 0; index < ids.length; index += 40) {
+        const uris = ids
+          .slice(index, index + 40)
+          .map((id) => `spotify:track:${id}`);
+        const query = new URLSearchParams({ uris: uris.join(",") });
+        await spotifyApi(`/me/library?${query}`, { method });
+      }
+      return {};
+    }
+    if (path === "/spotify/logout") return {};
+    throw new Error("This Spotify operation is not supported.");
+  }
+
+  async function exchangeSpotifyCode(code, flow) {
+    const response = await fetch("https://accounts.spotify.com/api/token", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+      },
+      body: new URLSearchParams({
+        grant_type: "authorization_code",
+        code,
+        redirect_uri: flow.redirectUri,
+        client_id: flow.clientId,
+        code_verifier: flow.verifier,
+      }),
+    });
+    const data = await response.json();
+    if (!response.ok)
+      throw new Error(
+        data.error_description || data.error || "Spotify sign-in failed.",
+      );
+    if (
+      typeof data.access_token !== "string" ||
+      typeof data.refresh_token !== "string"
+    )
+      throw new Error("Spotify returned incomplete sign-in credentials.");
+
+    spotifyClientId = flow.clientId;
+    spotifyAccessToken = data.access_token;
+    spotifyAccessTokenExpiresAt =
+      Date.now() + Math.max(0, Number(data.expires_in) || 3600) * 1000;
+    await persistSpotifyRefreshToken(data.refresh_token);
+    const profile = await fetchSpotifyData(true);
+    if (!profile) throw new Error("Spotify profile data could not be loaded.");
+    return profile;
+  }
+
+  async function completeSpotifyOAuth(code, flow) {
+    return exchangeSpotifyCode(code, flow);
+  }
+
+  async function completeSpotifyWebRedirect() {
+    const params = new URLSearchParams(window.location.search);
+    const code = params.get("code");
+    const error = params.get("error");
+    if (!code && !error) return false;
+
+    const flow = {
+      clientId: sessionStorage.getItem("wavelength-spotify-oauth-client-id") || "",
+      verifier: sessionStorage.getItem("wavelength-spotify-oauth-verifier") || "",
+      state: sessionStorage.getItem("wavelength-spotify-oauth-state") || "",
+      redirectUri:
+        sessionStorage.getItem("wavelength-spotify-oauth-redirect-uri") || "",
+    };
+    sessionStorage.removeItem("wavelength-spotify-oauth-client-id");
+    sessionStorage.removeItem("wavelength-spotify-oauth-verifier");
+    sessionStorage.removeItem("wavelength-spotify-oauth-state");
+    sessionStorage.removeItem("wavelength-spotify-oauth-redirect-uri");
+    window.history.replaceState(
+      window.history.state,
+      "",
+      window.location.pathname,
+    );
+
+    if (params.get("state") !== flow.state || !flow.state)
+      throw new Error("Spotify sign-in state did not match. Please try again.");
+    if (error) throw new Error("Spotify sign-in was not approved.");
+    if (!code || !flow.clientId || !flow.verifier || !flow.redirectUri)
+      throw new Error("Spotify sign-in returned an incomplete response.");
+    await completeSpotifyOAuth(code, flow);
+    return true;
+  }
+
+  async function restoreStandaloneSpotifySession() {
+    spotifyRefreshToken = isTauri()
+      ? (await invoke("get_spotify_refresh_token")) || ""
+      : localStorage.getItem("wavelength-spotify-refresh-token") || "";
+    if (!spotifyRefreshToken) {
+      spotifyConnected = false;
+      spotifyProfile = null;
+      spotifyPlaylists = [];
+      spotifySavedTracks = [];
+      localStorage.removeItem("wavelength-spotify-connected");
+      return;
+    }
+    try {
+      await getSpotifyAccessToken();
+      const profile = await fetchSpotifyData();
+      if (!profile) throw new Error("Spotify profile data could not be loaded.");
+    } catch (error) {
+      spotifyAccessToken = "";
+      spotifyAccessTokenExpiresAt = 0;
+      spotifyConnected = false;
+      spotifyProfile = null;
+      spotifyPlaylists = [];
+      spotifySavedTracks = [];
+      localStorage.removeItem("wavelength-spotify-connected");
+      throw error;
+    }
+  }
+
+  function saveSpotifyClientId() {
+    const previousClientId =
+      localStorage.getItem("wavelength-spotify-client-id") || "";
+    spotifyClientId = spotifyClientId.trim();
+    localStorage.setItem("wavelength-spotify-client-id", spotifyClientId);
+    if (previousClientId === spotifyClientId) return;
+
+    spotifyAccessToken = "";
+    spotifyAccessTokenExpiresAt = 0;
+    spotifyConnected = false;
+    spotifyProfile = null;
+    spotifyPlaylists = [];
+    spotifySavedTracks = [];
+    localStorage.removeItem("wavelength-spotify-connected");
+    void persistSpotifyRefreshToken(null).catch((error) => {
+      notice = `Spotify credentials could not be cleared: ${error.message}`;
+    });
+    notice = "Spotify Client ID saved. Connect Spotify to continue.";
+  }
+
   async function fetchSpotifyData(announce = false) {
     try {
       const profile = await api("/spotify/me");
@@ -3031,9 +3537,12 @@
       spotifyProfile = profile;
       spotifyConnected = true;
       localStorage.setItem("wavelength-spotify-connected", "true");
-      await fetchSpotifyLibrary();
+      const unavailablePlaylistCount = await fetchSpotifyLibrary();
       if (announce)
         notice = `Spotify connected as ${profile.display_name || profile.id}.`;
+      if (unavailablePlaylistCount) {
+        notice = `Spotify denied access to tracks in ${unavailablePlaylistCount} playlist${unavailablePlaylistCount === 1 ? "" : "s"}.`;
+      }
       return profile;
     } catch (error) {
       spotifyConnected = false;
@@ -3089,13 +3598,70 @@
     )) {
       await syncPlaylistToSpotify(playlist);
     }
+    return data.unavailablePlaylistCount || 0;
   }
 
-  function connectSpotify() {
+  async function connectSpotify() {
     if (pendingInviteCode)
       localStorage.setItem("wavelength-pending-invite", pendingInviteCode);
+
+    if (spotifyClientId) {
+      try {
+        if (!/^[A-Za-z0-9]{16,64}$/.test(spotifyClientId.trim()))
+          throw new Error("Enter a valid Spotify Client ID in Settings.");
+        const flow = await createSpotifyPkceFlow();
+        if (isTauri()) {
+          pendingSpotifyOAuth = flow;
+          await invoke("start_spotify_pkce_oauth", {
+            clientId: flow.clientId,
+            codeChallenge: flow.challenge,
+            state: flow.state,
+          });
+        } else {
+          sessionStorage.setItem(
+            "wavelength-spotify-oauth-client-id",
+            flow.clientId,
+          );
+          sessionStorage.setItem(
+            "wavelength-spotify-oauth-verifier",
+            flow.verifier,
+          );
+          sessionStorage.setItem("wavelength-spotify-oauth-state", flow.state);
+          sessionStorage.setItem(
+            "wavelength-spotify-oauth-redirect-uri",
+            flow.redirectUri,
+          );
+          const authorizeUrl = new URL("https://accounts.spotify.com/authorize");
+          authorizeUrl.search = new URLSearchParams({
+            response_type: "code",
+            client_id: flow.clientId,
+            redirect_uri: flow.redirectUri,
+            scope:
+              "user-read-private user-read-email user-library-read user-library-modify playlist-read-private playlist-read-collaborative playlist-modify-public playlist-modify-private",
+            code_challenge_method: "S256",
+            code_challenge: flow.challenge,
+            state: flow.state,
+          }).toString();
+          window.location.assign(authorizeUrl.toString());
+        }
+      } catch (error) {
+        pendingSpotifyOAuth = null;
+        notice = error?.message || "Spotify sign-in could not be opened.";
+      }
+      return;
+    }
+
     if (isTauri() && !roomServerUrl) {
-      notice = "Set the room server URL in Settings before connecting Spotify.";
+      notice =
+        "Enter a Spotify Client ID in Settings or configure a room server to connect Spotify.";
+      return;
+    }
+    if (isTauri()) {
+      void invoke("start_spotify_oauth", { serverUrl: roomServerUrl }).catch(
+        (error) => {
+          notice = error?.message || "Spotify sign-in could not be opened.";
+        },
+      );
       return;
     }
     const returnOrigin = encodeURIComponent(window.location.origin);
@@ -3106,17 +3672,33 @@
   }
 
   async function disconnectSpotify() {
-    try {
-      await api("/spotify/logout", { method: "POST" });
-    } catch {}
+    let logoutError = null;
+    if (spotifyClientId) {
+      try {
+        await persistSpotifyRefreshToken(null);
+      } catch (error) {
+        logoutError = error;
+      }
+    } else {
+      try {
+        await api("/spotify/logout", { method: "POST" });
+      } catch (error) {
+        logoutError = error;
+      }
+    }
     spotifyConnected = false;
     spotifyProfile = null;
     spotifyPlaylists = [];
     spotifySavedTracks = [];
+    spotifyAccessToken = "";
+    spotifyAccessTokenExpiresAt = 0;
+    spotifyRefreshToken = "";
     localStorage.removeItem("wavelength-spotify-connected");
     localStorage.removeItem("wavelength-spotify-profile");
     localStorage.removeItem("wavelength-spotify-token");
-    notice = "Spotify disconnected.";
+    notice = logoutError
+      ? `Disconnected from Spotify locally, but remote logout failed: ${logoutError.message}`
+      : "Spotify disconnected.";
   }
 
   async function loadLibrary() {
@@ -3292,6 +3874,10 @@
           )
         : [];
     if (target === "page") searchLoading = true;
+    if (offset === 0) {
+      if (target === "topbar") topbarSearchResults = localMatches;
+      else if (!append) searchResults = localMatches;
+    }
     const abortController = new AbortController();
     searchAbortController = abortController;
     const useSpotifyAccountSearch =
@@ -3811,8 +4397,12 @@
   }
 
   function openExternalPage(url) {
-    if (url) window.open(url, "_blank", "noopener,noreferrer");
     contextMenu = null;
+    if (isTauri()) {
+      notice = "External websites cannot be opened inside Wavelength.";
+      return;
+    }
+    if (url) window.open(url, "_blank", "noopener,noreferrer");
   }
 
   function openSongDetails(track) {
@@ -5799,6 +6389,7 @@
   <audio
     bind:this={audioElement}
     src={audioUrl || undefined}
+    crossorigin="anonymous"
     preload="metadata"
     on:timeupdate={handleAudioTimeUpdate}
     on:loadedmetadata={handleAudioTimeUpdate}
@@ -6207,8 +6798,12 @@
           </div>
         </aside>
       {/if}
-      <header class:has-back={appNavigationStack.length > 1} class="topbar">
-        <div class="topbar-start">
+      <header
+        class:has-back={appNavigationStack.length > 1}
+        class="topbar"
+        data-tauri-drag-region
+      >
+        <div class="topbar-start" data-tauri-drag-region>
           <img
             class="topbar-brand-mark"
             src={brandMark}
@@ -6235,7 +6830,7 @@
             >
           </div>
         </div>
-        <div class="topbar-center">
+        <div class="topbar-center" data-tauri-drag-region>
           <div class="topbar-mobile-crumb">
             <strong>{pageTitle}</strong>
           </div>
@@ -6371,7 +6966,7 @@
             </form>
           </div>
         </div>
-        <div class="topbar-end">
+        <div class="topbar-end" data-tauri-drag-region>
           {#if mobileViewport}
           <button
             class="mobile-party-toggle"
@@ -6661,6 +7256,7 @@
             <SettingsPage
               {spotifyConnected}
               {spotifyProfile}
+              bind:spotifyClientId
               {downloadDirectoryName}
               tauriAvailable={isTauri()}
               {appUpdateChecking}
@@ -6675,6 +7271,7 @@
               {mobileViewport}
               onDisconnectSpotify={disconnectSpotify}
               onConnectSpotify={connectSpotify}
+              onSaveSpotifyClientId={saveSpotifyClientId}
               onOpenFolderManager={openFolderManager}
               onChooseDownloadDirectory={chooseDownloadDirectory}
               onNavigate={navigate}
@@ -6688,7 +7285,12 @@
               {appTheme}
               {themeOptions}
               {appAccent}
+              {appBackgroundColor}
+              defaultBackgroundColor={resolvedTheme() === "light"
+                ? "#f5f6f2"
+                : "#10110f"}
               onThemeChange={setTheme}
+              onBackgroundChange={setBackgroundColor}
               onOpenAccentPicker={openAccentPicker}
             />
           {/if}

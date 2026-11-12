@@ -195,6 +195,9 @@
                         disabled={equalizerUnavailable || !qIsAvailable}
                         on:input={(event) => onSetQ(selectedEqualizerBand, event)}
                     />
+                    <small class="equalizer-parameter-help">
+                        Q controls bandwidth: lower values affect a wider range; higher values are narrower.
+                    </small>
                 </label>
             </section>
         </div>

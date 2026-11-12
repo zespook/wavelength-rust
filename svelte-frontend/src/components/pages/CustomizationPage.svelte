@@ -4,7 +4,10 @@
     export let appTheme = "dark";
     export let themeOptions = [];
     export let appAccent = "";
+    export let appBackgroundColor = "";
+    export let defaultBackgroundColor = "#10110f";
     export let onThemeChange;
+    export let onBackgroundChange;
     export let onOpenAccentPicker;
 </script>
 
@@ -20,6 +23,28 @@
                 className="appearance-select"
                 on:change={(event) => onThemeChange(event.detail)}
             />
+        </div>
+        <div class="customization-background-control">
+            <div class="settings-row-copy">
+                <strong>Background color</strong>
+                <small>Choose a custom page background.</small>
+            </div>
+            <div class="background-color-actions">
+                <input
+                    class="background-color-picker"
+                    type="color"
+                    value={appBackgroundColor || defaultBackgroundColor}
+                    aria-label="Background color"
+                    on:input={(event) => onBackgroundChange(event.currentTarget.value)}
+                />
+                {#if appBackgroundColor}
+                    <button
+                        class="outline-button compact-action"
+                        type="button"
+                        on:click={() => onBackgroundChange("")}>Default</button
+                    >
+                {/if}
+            </div>
         </div>
         <div class="customization-accent-control">
             <div class="settings-row-copy"><strong>Accent color</strong></div>

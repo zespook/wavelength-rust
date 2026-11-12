@@ -409,6 +409,7 @@ async def search(
                 "quiet": True,
                 "skip_download": True,
                 "ignoreerrors": True,
+                "extract_flat": "in_playlist" if not video_id else False,
             }
             target = f"https://www.youtube.com/watch?v={video_id}" if video_id else f"ytsearch{min(limit, 20)}:{q}"
 

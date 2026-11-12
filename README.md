@@ -35,7 +35,7 @@ Start the web app and its local Qobuz/audio services:
 npm run dev
 ```
 
-The app is available at `http://127.0.0.1:5173`. The launcher starts the local Qobuz API on port `8000` and audio service on port `8787`; it installs service Python dependencies into a virtual environment when needed. Spotify search requires Spotify client credentials in the repository `.env`; YouTube search does not.
+The app is available at `http://127.0.0.1:5173`. The launcher starts the local Qobuz API on port `8000` and audio service on port `8787`; it installs service Python dependencies into a virtual environment when needed. Spotify account search works after direct Spotify sign-in. The audio service's catalog search still uses Spotify client credentials in the repository `.env`; YouTube search does not.
 
 To run the desktop app instead, from `svelte-frontend` run:
 
@@ -51,13 +51,17 @@ npm run desktop:build
 
 The installer is written to `svelte-frontend/src-tauri/target/release/bundle/nsis/`. See [DESKTOP.md](./DESKTOP.md) for additional desktop and deployment details.
 
+## Connect Spotify directly
+
+Spotify can be connected without the self-hosted room server. Create an app in the [Spotify Developer Dashboard](https://developer.spotify.com/dashboard), then enter its Client ID in Wavelength Settings; a client secret is not needed. Add `http://127.0.0.1:43821/callback` to the app's Redirect URIs for the desktop client. A web deployment must also add its exact app URL as a Redirect URI. Sign-in uses PKCE in the system browser, and Spotify profile, saved tracks, playlists, and search results are loaded directly from Spotify.
+
 ## Release versions
 
 Push a semantic version tag such as `v1.2.3` to build a desktop release. The release workflow uses the tag (without its leading `v`) as the Tauri app version, so installer and updater asset names use the tagged version automatically. GitHub release titles include the full tag.
 
 ## Run the self-hosted server with Docker
 
-Dockerfiles and Compose manifests are intentionally not included. The following Bash instructions build the Rust room API using an inline Dockerfile and run it with MongoDB. From the repository root, copy `.env.example` to `.env`, then set `ROOM_SERVER_PASSCODE` to a unique value of at least 16 characters. Spotify OAuth is optional; to enable it, also configure the Spotify client credentials and register the callback URI in the Spotify developer dashboard.
+Dockerfiles and Compose manifests are intentionally not included. The following Bash instructions build the Rust room API using an inline Dockerfile and run it with MongoDB. From the repository root, copy `.env.example` to `.env`, then set `ROOM_SERVER_PASSCODE` to a unique value of at least 16 characters. Server-managed Spotify OAuth is optional; the Wavelength app can instead connect directly using the Client ID in Settings.
 
 Build the backend image:
 
