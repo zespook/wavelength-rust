@@ -1,0 +1,41 @@
+# Dependencies and build output
+node_modules/
+dist/
+target/
+.vite/
+.pytest_cache/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+
+# Runtime data and logs
+cache/
+.mongodb-data/
+qobuz-rest-api/downloads/
+*.log
+
+# Generated desktop service bundle
+svelte-frontend/src-tauri/resources/services/
+
+# Packaged desktop installers and build outputs
+svelte-frontend/installer/
+
+# Unrelated local project archive
+/lcam.zip
+
+# Platform and temporary files
+.DS_Store
+Thumbs.db
+*.tmp
+brio-settings/bin/
+brio-settings/obj/
+brio-settings/publish/
+brio-settings-rust/target/

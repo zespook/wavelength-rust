@@ -1,0 +1,3 @@
+[submodule "qobuz-rest-api"]
+	path = qobuz-rest-api
+	url = https://github.com/BartolomeoRusso9/qobuz-rest-api.git

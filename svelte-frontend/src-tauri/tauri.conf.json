@@ -1,0 +1,53 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Wavelength",
+  "version": "0.1.0",
+  "identifier": "com.wavelength.player",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:5173",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "withGlobalTauri": false,
+    "windows": [
+      {
+        "label": "player",
+        "title": "Wavelength",
+        "url": "index.html",
+        "width": 1440,
+        "height": 920,
+        "decorations": false,
+        "minWidth": 375,
+        "minHeight": 730
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data: blob: https:; media-src 'self' blob: data:; connect-src 'self' ipc: http://ipc.localhost http://localhost:* http://127.0.0.1:* http://[::1]:* https://lrclib.net https:"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": [
+      "nsis"
+    ],
+    "resources": {
+      "resources/services": "services"
+    },
+    "windows": {
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper"
+      }
+    },
+    "createUpdaterArtifacts": true
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IENCQjlGOUREREZBMTczMzEKUldReGM2SGYzZm01eTk2cndiL2ZpSzJsVlN1bURXbjlaOU01cGUzUEo4VEhEYUtVQkxNRjNvMDEK",
+      "endpoints": [
+        "https://github.com/zespook/wavelength/releases/latest/download/latest.json"
+      ]
+    }
+  }
+}
