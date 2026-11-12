@@ -40,5 +40,5 @@ brio-settings/obj/
 brio-settings/publish/
 brio-settings-rust/target/
 
-.github/
+.github/skills/
 .vscode/
