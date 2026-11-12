@@ -39,3 +39,6 @@ brio-settings/bin/
 brio-settings/obj/
 brio-settings/publish/
 brio-settings-rust/target/
+
+.github/
+.vscode/
