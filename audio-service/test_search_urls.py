@@ -1,4 +1,5 @@
 import unittest
+from pathlib import Path
 from threading import get_ident
 from unittest.mock import patch
 
@@ -100,6 +101,35 @@ class SearchUrlTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["results"][0]["videoId"], "abcDEF_1234")
         self.assertEqual(result["results"][0]["length"], "2:00")
         self.assertEqual(result["results"][0]["source"], "youtube")
+
+    def test_youtube_audio_download_uses_default_player_clients(self):
+        options_seen = []
+        requested = []
+
+        class FakeYoutubeDL:
+            def __init__(self, options):
+                options_seen.append(options)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return None
+
+            def download(self, urls):
+                requested.extend(urls)
+
+        with (
+            patch.object(main, "YoutubeDL", FakeYoutubeDL),
+            patch.object(main, "CACHE_DIR", Path("test-cache")),
+        ):
+            main._download_youtube_audio("abcDEF_1234", "yt-abcDEF_1234")
+
+        self.assertNotIn("extractor_args", options_seen[0])
+        self.assertEqual(
+            requested,
+            ["https://www.youtube.com/watch?v=abcDEF_1234"],
+        )
 
 
 if __name__ == "__main__":

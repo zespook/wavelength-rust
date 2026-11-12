@@ -376,6 +376,22 @@ fn start_spotify_oauth(
 
 const SPOTIFY_CALLBACK_URI: &str = "http://127.0.0.1:43821/callback";
 
+fn focus_player_window(app: &AppHandle) {
+	let Some(window) = app.get_webview_window("player") else {
+		eprintln!("Could not return from Spotify sign-in: player window is unavailable.");
+		return;
+	};
+	if let Err(error) = window.unminimize() {
+		eprintln!("Could not restore Wavelength after Spotify sign-in: {error}");
+	}
+	if let Err(error) = window.show() {
+		eprintln!("Could not show Wavelength after Spotify sign-in: {error}");
+	}
+	if let Err(error) = window.set_focus() {
+		eprintln!("Could not focus Wavelength after Spotify sign-in: {error}");
+	}
+}
+
 fn is_spotify_pkce_value(value: &str) -> bool {
 	(43..=128).contains(&value.len())
 		&& value
@@ -485,17 +501,18 @@ fn start_spotify_pkce_oauth(
 								"redirectUri": SPOTIFY_CALLBACK_URI,
 							}),
 						);
-						body_text = "Spotify sign-in is complete. You can return to Wavelength.";
+						body_text = "Spotify sign-in is complete. Returning to Wavelength.";
 					} else if error.is_some() {
 						let _ = callback_app.emit(
 							"spotify-oauth-result",
 							serde_json::json!({"status": "error"}),
 						);
-						body_text = "Spotify sign-in was not completed. You can return to Wavelength.";
+						body_text = "Spotify sign-in was not completed. Returning to Wavelength.";
 					} else {
 						continue;
 					}
 
+					focus_player_window(&callback_app);
 					let body = format!(
 						"<!doctype html><meta charset=\"utf-8\"><title>Wavelength</title><p>{body_text}</p>"
 					);

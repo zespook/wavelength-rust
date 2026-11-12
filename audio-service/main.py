@@ -740,7 +740,6 @@ def _download_youtube_audio(video_id: str, track_id: str, progress_hook=None):
         "no_warnings": True,
         "noplaylist": True,
         "format": "bestaudio/best",
-        "extractor_args": {"youtube": {"player_client": ["android"]}},
         "outtmpl": str(CACHE_DIR / f"{track_id}.%(ext)s"),
     }
     if progress_hook:
