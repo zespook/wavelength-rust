@@ -23,4 +23,4 @@ npm run dev
 Pop-Location
 ```
 
-The Rust service requires the Rust toolchain or Docker. It connects directly to MongoDB and `audio-service`; set `MONGODB_URI` and `AUDIO_SERVICE_URL` when running it outside Compose.
+The Rust room API requires MongoDB. See the Docker server setup in `README.md`; for local runs, set `MONGODB_URI` to the MongoDB address.

@@ -1,7 +1,6 @@
 <script>
   import { onMount, tick } from "svelte";
   import { invoke, isTauri } from "@tauri-apps/api/core";
-  import { listen } from "@tauri-apps/api/event";
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import brandMark from "../src-tauri/icons/128x128.png";
   import { relaunch } from "@tauri-apps/plugin-process";
@@ -244,10 +243,7 @@
     localStorage.getItem("wavelength-party-host-token") || "";
   let roomServerUrl = "";
   let roomServerInput = "";
-  let roomServerPasscodeInput = "";
-  let roomAccessToken = "";
   let localAudioBasePromise = null;
-  let spotifyOAuthListenerPromise = Promise.resolve();
   let roomServerUrlLoaded = false;
   let roomServerSaving = false;
   let partyMembers = [];
@@ -286,6 +282,16 @@
   let customAccentInput = appAccent;
   let customAccentError = "";
   let systemThemeMedia = null;
+  const uiScaleStorageKey = "wavelength-ui-scale";
+  const uiScaleMinimum = 0.75;
+  const uiScaleMaximum = 1.5;
+  let uiScale = (() => {
+    const savedScale = localStorage.getItem(uiScaleStorageKey);
+    const parsedScale = savedScale === null ? 1 : Number(savedScale);
+    return Number.isFinite(parsedScale)
+      ? Math.min(uiScaleMaximum, Math.max(uiScaleMinimum, parsedScale))
+      : 1;
+  })();
 
   function resolvedTheme() {
     if (appTheme !== "system") return appTheme;
@@ -823,10 +829,7 @@
       return;
     }
     try {
-      const handle = await window.showDirectoryPicker({ mode: "readwrite" });
-      const permission = await handle.requestPermission({ mode: "readwrite" });
-      if (permission !== "granted")
-        throw new Error("Downloads folder permission was not granted.");
+      const handle = await window.showDirectoryPicker();
       const database = await folderDatabase();
       const transaction = database.transaction("folders", "readwrite");
       transaction
@@ -2082,6 +2085,35 @@
     localStorage.setItem("wavelength-resolved-accent", safeAccent);
   }
 
+  function applyUiScale() {
+    document.documentElement.style.setProperty("--app-scale", String(uiScale));
+    localStorage.setItem(uiScaleStorageKey, String(uiScale));
+  }
+
+  function handleUiScaleShortcut(event) {
+    if (!event.ctrlKey || event.altKey || event.metaKey) return;
+    const direction =
+      event.key === "+" ||
+      event.key === "=" ||
+      event.code === "NumpadAdd"
+        ? 1
+        : event.key === "-" ||
+            event.key === "_" ||
+            event.code === "NumpadSubtract"
+          ? -1
+          : 0;
+    if (!direction) return;
+    event.preventDefault();
+    uiScale = Math.min(
+      uiScaleMaximum,
+      Math.max(
+        uiScaleMinimum,
+        Math.round((uiScale + direction * 0.1) * 100) / 100,
+      ),
+    );
+    applyUiScale();
+  }
+
   function setTheme(theme) {
     appTheme = theme;
     applyAppearance();
@@ -2191,6 +2223,18 @@
   }
 
   function goBack() {
+    if (
+      activeView === "collection" &&
+      appNavigationStack.at(-2) !== "/playlists"
+    ) {
+      window.history.replaceState({}, "", "/playlists");
+      appNavigationStack = ["/playlists"];
+      forwardNavigationStack = [];
+      activeView = "playlists";
+      selectedCollectionId = "";
+      persistNavigationHistory();
+      return;
+    }
     if (appNavigationStack.length < 2) return;
     forwardNavigationStack = [
       ...forwardNavigationStack,
@@ -2224,36 +2268,8 @@
   onMount(() => {
     systemThemeMedia = window.matchMedia("(prefers-color-scheme: dark)");
     applyAppearance();
+    applyUiScale();
     loadDownloadDirectory();
-    if (isTauri()) {
-      void localAudioBase().catch((error) => {
-        notice = error.message || "The local audio service is unavailable.";
-      });
-      spotifyOAuthListenerPromise = listen(
-        "spotify-oauth-result",
-        async ({ payload }) => {
-          if (payload.status !== "connected" || !payload.ticket) {
-            notice = "Spotify sign-in was not completed.";
-            return;
-          }
-          try {
-            await api("/spotify/desktop-exchange", {
-              method: "POST",
-              body: JSON.stringify({ ticket: payload.ticket }),
-            });
-            const profile = await fetchSpotifyData(true);
-            if (profile && pendingInviteCode) {
-              joinPartyAs(profile.display_name || profile.id, pendingInviteCode);
-            }
-          } catch (error) {
-            notice = error.message || "Spotify connection failed.";
-          }
-        },
-      );
-      void spotifyOAuthListenerPromise.catch((error) => {
-        notice = error.message || "Could not initialize Spotify sign-in.";
-      });
-    }
     void restoreQobuzCredentials();
     if (isTauri()) {
       appUpdateStartupTimer = window.setTimeout(
@@ -2428,23 +2444,15 @@
     const handleOutsideContextMenu = (event) => {
       if (!event.target.closest(".context-menu")) contextMenu = null;
     };
-    const handleExternalNavigation = (event) => {
-      const link =
-        event.target instanceof Element ? event.target.closest("a[href]") : null;
-      if (!link) return;
-      const destination = new URL(link.href, window.location.href);
-      if (destination.origin !== window.location.origin) event.preventDefault();
-    };
     window.addEventListener("popstate", handleNavigation);
     window.addEventListener("click", handleOutsideContextMenu);
     window.addEventListener("keydown", handleLyricsKeydown);
-    if (isTauri())
-      document.addEventListener("click", handleExternalNavigation, true);
+    window.addEventListener("keydown", handleUiScaleShortcut);
     const librariesReady = Promise.all([loadLibrary(), loadSavedFolders()]);
     librariesReady.then(restoreLastPlayback);
     roomServerReady.then(async () => {
       await librariesReady;
-      if (joinedParty && roomAccessToken) await restorePartySession();
+      if (joinedParty) await restorePartySession();
     });
     refreshQueueDownloadStatus();
     downloadRefreshTimer = window.setInterval(() => {
@@ -2537,11 +2545,8 @@
       window.removeEventListener("popstate", handleNavigation);
       window.removeEventListener("click", handleOutsideContextMenu);
       window.removeEventListener("keydown", handleLyricsKeydown);
+      window.removeEventListener("keydown", handleUiScaleShortcut);
       window.removeEventListener("resize", handleViewportResize);
-      document.removeEventListener("click", handleExternalNavigation, true);
-      void spotifyOAuthListenerPromise
-        .then((unlisten) => unlisten())
-        .catch(() => {});
       systemThemeMedia.removeEventListener?.("change", applyAppearance);
       if (appUpdateStartupTimer) clearTimeout(appUpdateStartupTimer);
       if (appUpdatePollingTimer) clearInterval(appUpdatePollingTimer);
@@ -2566,8 +2571,6 @@
     };
     const roomRequest = path.startsWith("/parties");
     const spotifyRequest = path.startsWith("/spotify/");
-    const remoteServerRequest =
-      roomRequest || (spotifyRequest && Boolean(roomServerUrl));
     const localAudioRequest = isLocalPlayer() && path.startsWith("/audio/");
     if (roomRequest && !roomServerUrl)
       throw new Error(
@@ -2575,12 +2578,6 @@
       );
     if (spotifyRequest && isTauri() && !roomServerUrl)
       throw new Error("Set a room server URL in Settings to use Spotify.");
-    if (remoteServerRequest && !roomAccessToken)
-      throw new Error(
-        "Enter the server passcode in Settings to use this server.",
-      );
-    if (remoteServerRequest)
-      headers["X-Room-Access-Token"] = roomAccessToken;
     if (roomRequest && partyHostToken)
       headers.Authorization = `Bearer ${partyHostToken}`;
     let baseUrl = "/api";
@@ -2598,15 +2595,6 @@
           : "same-origin",
     });
     const data = await response.json().catch(() => ({}));
-    if (
-      remoteServerRequest &&
-      response.status === 401 &&
-      data.error ===
-        "Enter the server passcode in Settings to use this server"
-    ) {
-      roomAccessToken = "";
-      throw new Error("Enter the server passcode in Settings to reconnect.");
-    }
     if (roomRequest && response.status === 401 && partyHostToken) {
       partyHostToken = "";
       localStorage.removeItem("wavelength-party-host-token");
@@ -2660,55 +2648,13 @@
       roomServerUrl = "";
     }
     roomServerInput = roomServerUrl;
-    if (roomServerUrl) {
-      try {
-        const savedPasscode = isTauri()
-          ? await invoke("get_room_server_passcode")
-          : localStorage.getItem("wavelength-room-server-passcode");
-        if (savedPasscode) {
-          roomAccessToken = await authenticateRoomServer(
-            roomServerUrl,
-            savedPasscode,
-          );
-        }
-      } catch (error) {
-        roomAccessToken = "";
-        notice =
-          error.message || "The saved room-server passcode could not be used.";
-      }
-    }
     roomServerUrlLoaded = true;
-  }
-
-  async function persistRoomServerPasscode(passcode) {
-    if (isTauri()) {
-      await invoke("set_room_server_passcode", { passcode });
-    } else if (passcode) {
-      localStorage.setItem("wavelength-room-server-passcode", passcode);
-    } else {
-      localStorage.removeItem("wavelength-room-server-passcode");
-    }
-  }
-
-  async function authenticateRoomServer(serverUrl, passcode) {
-    const response = await fetch(`${serverUrl}/api/auth/session`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ passcode }),
-      credentials: "omit",
-    });
-    const data = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(data.error || "Server connection failed.");
-    if (typeof data.token !== "string" || !data.token)
-      throw new Error("The room server returned an invalid access token.");
-    return data.token;
   }
 
   async function saveRoomServerUrl() {
     roomServerSaving = true;
     try {
       const normalizedUrl = normalizeRoomServerUrl(roomServerInput);
-      const serverChanged = roomServerUrl !== normalizedUrl;
       if (joinedParty && roomServerUrl !== normalizedUrl) {
         if (partyRole === "host") {
           try {
@@ -2719,35 +2665,14 @@
         }
         clearPartySession();
       }
-      if (serverChanged || !normalizedUrl) {
-        await persistRoomServerPasscode("");
-        roomAccessToken = "";
-        roomServerPasscodeInput = "";
-      }
       if (isTauri())
         await invoke("set_server_url", { serverUrl: normalizedUrl });
       else localStorage.setItem("wavelength-room-server-url", normalizedUrl);
       roomServerUrl = normalizedUrl;
       roomServerInput = normalizedUrl;
-      if (!normalizedUrl) {
-        notice = "Room server disconnected.";
-        return;
-      }
-      if (roomServerPasscodeInput) {
-        const passcode = roomServerPasscodeInput;
-        roomAccessToken = await authenticateRoomServer(
-          normalizedUrl,
-          passcode,
-        );
-        await persistRoomServerPasscode(passcode);
-        roomServerPasscodeInput = "";
-        if (joinedParty) await restorePartySession();
-        notice = "Room server connected.";
-      } else {
-        notice = roomAccessToken
-          ? "Room server saved."
-          : "Room server saved. Enter its passcode to connect.";
-      }
+      notice = normalizedUrl
+        ? "Room server saved."
+        : "Room server disconnected.";
     } catch (error) {
       notice = error.message || "Room server URL could not be saved.";
     } finally {
@@ -3166,24 +3091,11 @@
     }
   }
 
-  async function connectSpotify() {
+  function connectSpotify() {
     if (pendingInviteCode)
       localStorage.setItem("wavelength-pending-invite", pendingInviteCode);
     if (isTauri() && !roomServerUrl) {
       notice = "Set the room server URL in Settings before connecting Spotify.";
-      return;
-    }
-    if (roomServerUrl && !roomAccessToken) {
-      notice = "Enter the server passcode in Settings before connecting Spotify.";
-      return;
-    }
-    if (isTauri()) {
-      try {
-        await spotifyOAuthListenerPromise;
-        await invoke("start_spotify_oauth", { serverUrl: roomServerUrl });
-      } catch (error) {
-        notice = error.message || "Could not open Spotify sign-in.";
-      }
       return;
     }
     const returnOrigin = encodeURIComponent(window.location.origin);
@@ -3899,12 +3811,8 @@
   }
 
   function openExternalPage(url) {
-    contextMenu = null;
-    if (isTauri()) {
-      notice = "External websites are disabled in the desktop app.";
-      return;
-    }
     if (url) window.open(url, "_blank", "noopener,noreferrer");
+    contextMenu = null;
   }
 
   function openSongDetails(track) {
@@ -4286,6 +4194,34 @@
       JSON.stringify(playHistory),
     );
   }
+  async function prepareTrackAudio(
+    track,
+    { scope = joinedParty ? "room" : "permanent" } = {},
+  ) {
+    const trackId = getQueueAudioId(track);
+    const query = encodeURIComponent(trackId);
+    await api(`/audio/preload?video_ids=${query}&scope=${scope}`, {
+      method: "POST",
+    });
+    const deadline = Date.now() + 10 * 60 * 1000;
+    while (Date.now() < deadline) {
+      const data = await api(`/audio/status?video_ids=${query}`);
+      const status = data.tracks?.[trackId];
+      if (status)
+        queueDownloadStatuses = { ...queueDownloadStatuses, [trackId]: status };
+      if (status?.status === "ready") return;
+      if (status?.status === "error" || status?.status === "cancelled") {
+        throw new Error(
+          status.error ||
+            "Audio preparation failed. Check the logs for details.",
+        );
+      }
+      await new Promise((resolve) => window.setTimeout(resolve, 1000));
+    }
+    throw new Error(
+      "Audio did not become ready in time. Check the logs for details.",
+    );
+  }
   async function playTrack(
     track,
     {
@@ -4322,6 +4258,20 @@
       (error) => error,
     );
     playbackRequestPending = true;
+    if (isQueueDownloadable(track)) {
+      try {
+        await prepareTrackAudio(track, {
+          scope: roomSession ? "room" : "permanent",
+        });
+      } catch (error) {
+        if (requestId === playbackRequestId) {
+          playbackRequestPending = false;
+          notice = error.message;
+        }
+        return;
+      }
+      if (requestId !== playbackRequestId) return;
+    }
     playing = track;
     pendingHistoryTrack = track;
     currentTime = Math.max(0, Number(startTime) || 0);
@@ -4337,14 +4287,7 @@
     const streamPath = `/stream/${encodeURIComponent(trackId)}?code=solo&scope=${roomSession ? "room" : "permanent"}`;
     const sharedAudioUrl =
       roomSession && joinedParty && track.serverAudioId
-        ? new URL(
-            (
-              await api(
-                `/parties/${encodeURIComponent(joinedParty)}/audio/${encodeURIComponent(track.serverAudioId)}/access`,
-              )
-            ).url,
-            roomServerUrl,
-          ).toString()
+        ? `${roomServerUrl}/api/parties/${encodeURIComponent(joinedParty)}/audio/${encodeURIComponent(track.serverAudioId)}`
         : "";
     audioUrl =
       sharedAudioUrl ||
@@ -4382,10 +4325,8 @@
           playbackRequestPending = false;
           pendingHistoryTrack = null;
           isPlaying = false;
-          notice =
-            error?.name === "NotAllowedError"
-              ? "Playback was blocked. Press Play again to start audio."
-              : error.message || `Unable to play ${track.title}.`;
+          if (error?.name === "NotAllowedError")
+            notice = "Playback was blocked. Press Play again to start audio.";
         }
         return;
       }
@@ -4743,6 +4684,15 @@
           navigate("/settings");
           return;
         }
+        let permission = await downloadDirectoryHandle.queryPermission({
+          mode: "readwrite",
+        });
+        if (permission !== "granted")
+          permission = await downloadDirectoryHandle.requestPermission({
+            mode: "readwrite",
+          });
+        if (permission !== "granted")
+          throw new Error("Downloads folder permission was not granted.");
         const response = await fetch(downloadUrl);
         if (!response.ok)
           throw new Error(`Download failed (${response.status}).`);
@@ -4894,11 +4844,7 @@
     if (!joinedParty || !roomServerUrl || !partyDisplayName) return;
     const roomCode = joinedParty;
     partySocket = createSocket(roomServerUrl, {
-      auth: {
-        code: roomCode,
-        username: partyDisplayName,
-        accessToken: roomAccessToken,
-      },
+      auth: { code: roomCode, username: partyDisplayName },
       transports: ["websocket", "polling"],
       reconnection: true,
     });
@@ -5721,7 +5667,7 @@
         publishPartyPlaybackControl();
         schedulePartyStatePublish();
       })
-      .catch(() => {
+      .catch((error) => {
         if (requestId !== playbackRequestId) return;
         playbackRequestPending = false;
         isPlaying = false;
@@ -5816,9 +5762,6 @@
     if (volumeSliderOpen && !event.target.closest(".volume-control"))
       volumeSliderOpen = false;
   }
-  function preventNativeContextMenu(event) {
-    event.preventDefault();
-  }
   function switchRail(view) {
     const nextView = railView === view ? null : view;
     queueVisible = nextView === "queue" || nextView === "party";
@@ -5842,7 +5785,6 @@
   on:pointermove={handleWindowPointerMove}
   on:pointerup={stopRailResize}
   on:click={handleWindowClick}
-  on:contextmenu={preventNativeContextMenu}
 />
 
 <div
@@ -6241,7 +6183,7 @@
                 <label class="room-code-field"
                   >Room code<input
                     bind:value={partyCode}
-                    maxlength="12"
+                    maxlength="6"
                     placeholder="Enter a code"
                   /></label
                 >
@@ -6265,11 +6207,7 @@
           </div>
         </aside>
       {/if}
-      <header
-        class:has-back={appNavigationStack.length > 1}
-        class="topbar"
-        data-tauri-drag-region="deep"
-      >
+      <header class:has-back={appNavigationStack.length > 1} class="topbar">
         <div class="topbar-start">
           <img
             class="topbar-brand-mark"
@@ -6281,7 +6219,9 @@
             <button
               class="topbar-navigation-button"
               type="button"
-              disabled={appNavigationStack.length < 2}
+              disabled={
+                appNavigationStack.length < 2 && activeView !== "collection"
+              }
               on:click={goBack}
               aria-label="Go back"
               title="Back"><ChevronLeft size={17} /></button
@@ -6731,9 +6671,7 @@
               {accentOptions}
               {roomServerSaving}
               {roomServerUrl}
-              roomServerConnected={Boolean(roomAccessToken)}
               bind:roomServerInput
-              bind:roomServerPasscodeInput
               {mobileViewport}
               onDisconnectSpotify={disconnectSpotify}
               onConnectSpotify={connectSpotify}

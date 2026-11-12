@@ -45,6 +45,24 @@ jobs:
         working-directory: svelte-frontend
         run: npm ci
 
+      - name: Set app version from release tag
+        working-directory: svelte-frontend
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        shell: bash
+        run: |
+          node -e '
+            const fs = require("node:fs");
+            const tag = process.env.RELEASE_TAG;
+            const match = /^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.exec(tag);
+            if (!match) throw new Error(`Invalid release tag: ${tag}. Expected vMAJOR.MINOR.PATCH.`);
+            const configPath = "src-tauri/tauri.conf.json";
+            const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
+            config.version = tag.slice(1);
+            fs.writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`);
+            console.log(`Building Wavelength ${config.version}`);
+          '
+
       - name: Configure signed update feed
         working-directory: svelte-frontend
         env:
