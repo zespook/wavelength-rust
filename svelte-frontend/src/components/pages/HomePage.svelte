@@ -44,9 +44,9 @@
 
 {#if !downloadFolderReady}
     <aside class="home-download-folder-reminder" role="note">
-        <p>Set a download folder to enable search and downloads.</p>
+        <p>Choose a download destination to enable search and downloads.</p>
         <button type="button" on:click={onChooseDownloadDirectory}>
-            <FolderOpen size={16} />Choose download folder
+            <FolderOpen size={16} />Choose download destination
         </button>
     </aside>
 {/if}

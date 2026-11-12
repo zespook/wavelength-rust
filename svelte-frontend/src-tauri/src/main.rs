@@ -199,9 +199,9 @@ struct LocalServices {
 	children: Mutex<Vec<Child>>,
 }
 
-fn stop_local_service(child: &mut Child) {
+fn stop_local_service(child: &mut Child) -> Result<(), String> {
 	#[cfg(windows)]
-	{
+	let tree_kill_error = {
 		use std::os::windows::process::CommandExt;
 
 		let pid = child.id().to_string();
@@ -216,21 +216,51 @@ fn stop_local_service(child: &mut Child) {
 			.stdout(Stdio::null())
 			.stderr(Stdio::null())
 			.status();
-		if !matches!(&result, Ok(status) if status.success())
-			&& matches!(child.try_wait(), Ok(None))
-		{
-			eprintln!("Could not stop the local service process tree: {result:?}");
+		if matches!(&result, Ok(status) if status.success()) {
+			None
+		} else {
+			match child.try_wait() {
+				Ok(Some(_)) => None,
+				Ok(None) => Some(format!("Could not stop the local service process tree: {result:?}")),
+				Err(error) => Some(format!("Could not check the local service process: {error}; taskkill result: {result:?}")),
+			}
 		}
-	}
+	};
+	#[cfg(not(windows))]
+	let tree_kill_error: Option<String> = None;
 
 	if let Err(error) = child.kill() {
-		if matches!(child.try_wait(), Ok(None)) {
-			eprintln!("Could not stop the local service process: {error}");
+		match child.try_wait() {
+			Ok(Some(_)) => {}
+			Ok(None) => return Err(format!("Could not stop the local service process: {error}")),
+			Err(wait_error) => {
+				return Err(format!(
+					"Could not stop the local service process: {error}; could not confirm exit: {wait_error}"
+				));
+			}
 		}
 	}
-	if let Err(error) = child.wait() {
-		eprintln!("Could not wait for the local service process to exit: {error}");
+	child.wait().map_err(|error| format!("Could not wait for the local service process to exit: {error}"))?;
+	tree_kill_error.map_or(Ok(()), Err)
+}
+
+#[tauri::command]
+fn stop_local_services(app: AppHandle, window: WebviewWindow) -> Result<(), String> {
+	if window.label() != "player" {
+		return Err("This command is only available to the player window.".into());
 	}
+	let services = app
+		.try_state::<LocalServices>()
+		.ok_or_else(|| "Local service state is unavailable.".to_string())?;
+	let mut children = services
+		.children
+		.lock()
+		.map_err(|error| format!("Could not lock local services for shutdown: {error}"))?;
+	for child in children.iter_mut() {
+		stop_local_service(child)?;
+	}
+	children.clear();
+	Ok(())
 }
 
 fn local_service_port(app: &AppHandle) -> Result<u16, String> {
@@ -693,6 +723,7 @@ fn main() {
 			get_room_server_passcode,
 			set_room_server_passcode,
 			get_local_service_base,
+			stop_local_services,
 			get_download_directory,
 			set_download_directory,
 			choose_download_directory,
@@ -710,7 +741,9 @@ fn main() {
 					match services.children.lock() {
 						Ok(mut children) => {
 							for child in children.iter_mut() {
-								stop_local_service(child);
+								if let Err(error) = stop_local_service(child) {
+									eprintln!("Could not stop local service during app exit: {error}");
+								}
 							}
 						}
 						Err(error) => {

@@ -82,11 +82,8 @@
                 }}
                 on:pointerleave={onPointerLeave}
             >
-                <button
+                <div
                     class="track-select"
-                    disabled={searchDisabled}
-                    on:click={() => onPlay(track)}
-                    aria-label={`Play ${track.title}`}
                 >
                     <span class="track-name">
                         <span class="mini-art"
@@ -105,7 +102,7 @@
                     </span>
                     <span class="album-name">{track.album || "Single"}</span>
                     <span class="track-length">{track.length || "—"}</span>
-                </button>
+                </div>
                 <span class="track-actions">
                     <button
                         class="row-action play-row-action"

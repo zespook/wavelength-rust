@@ -1,10 +1,12 @@
 import os
 import asyncio
+import inspect
 import logging
 import shutil
 import json
 import re
 import time
+from importlib import import_module
 from collections import deque
 from pathlib import Path
 from threading import Lock
@@ -19,7 +21,7 @@ import spotipy
 from spotipy.exceptions import SpotifyException
 from spotipy.oauth2 import SpotifyClientCredentials
 from spotipy.cache_handler import CacheFileHandler
-from SpotiFLAC import SpotiFLAC
+from SpotiFLAC import AsyncSpotiFLAC
 import httpx
 from yt_dlp import YoutubeDL
 from playlist import format_track, load_album, load_playlist, load_public_album, load_public_playlist, load_public_track, spotify_album_id, spotify_playlist_id
@@ -548,6 +550,27 @@ async def set_qobuz_settings(credentials: QobuzCredentials):
     return {"configured": True}
 
 
+async def _run_spotiflac_download(**options):
+    url = options.pop("url")
+    output_dir = options.pop("output_dir")
+    if "use_extensions_fallback" not in inspect.signature(
+        AsyncSpotiFLAC
+    ).parameters:
+        options.pop("use_extensions_fallback", None)
+    async with AsyncSpotiFLAC(output_dir=output_dir, **options) as client:
+        if hasattr(client, "download_request"):
+            download_request = import_module(
+                "SpotiFLAC.core.config"
+            ).DownloadRequest
+            return await client.download_request(
+                download_request(
+                    sources=[url],
+                    config=client.application_config(),
+                )
+            )
+        return await client.download_track(url)
+
+
 async def _download_audio(track_id: str, scope: str = "permanent") -> Path:
     scope = _normalize_download_scope(scope)
     if track_id in _cancelled_downloads:
@@ -646,13 +669,31 @@ async def _download_audio(track_id: str, scope: str = "permanent") -> Path:
             if elapsed < DOWNLOAD_DELAY_SECONDS:
                 await asyncio.sleep(DOWNLOAD_DELAY_SECONDS - elapsed)
             _last_download_started = time.monotonic()
-            await asyncio.to_thread(SpotiFLAC, **kwargs)
+            report = await _run_spotiflac_download(**kwargs)
         if track_id in _cancelled_downloads:
             raise asyncio.CancelledError()
         audio_files = list(temp_dir.glob("**/*.flac")) + list(temp_dir.glob("**/*.m4a")) + list(temp_dir.glob("**/*.mp3"))
         logger.info("[SpotiFLAC] received %d candidate file(s) track=%s", len(audio_files), track_id)
         if not audio_files:
-            raise FileNotFoundError("No audio created")
+            failure_details = [
+                f"{failure.provider or 'provider'}: {failure.reason}"
+                for failure in getattr(report, "failed", [])
+                if failure.reason
+            ]
+            skip_details = [
+                skip.reason for skip in getattr(report, "skipped", []) if skip.reason
+            ]
+            if isinstance(report, list):
+                failure_details.extend(
+                    f"could not download {track.title}"
+                    for track in report
+                    if getattr(track, "title", None)
+                )
+            details = "; ".join(failure_details + skip_details)
+            message = "SpotiFLAC did not produce audio"
+            if details:
+                message = f"{message}: {details}"
+            raise RuntimeError(message)
         audio_files.sort(key=lambda f: f.stat().st_ctime, reverse=True)
         latest = audio_files[0]
         ext = latest.suffix

@@ -291,6 +291,7 @@
   const uiScaleStorageKey = "wavelength-ui-scale";
   const uiScaleMinimum = 0.75;
   const uiScaleMaximum = 1.5;
+  const uiScaleStep = 0.1;
   let uiScale = (() => {
     const savedScale = localStorage.getItem(uiScaleStorageKey);
     const parsedScale = savedScale === null ? 1 : Number(savedScale);
@@ -369,6 +370,7 @@
   let downloadDirectoryHandle = null;
   let downloadDirectoryName = "";
   let downloadDirectoryLoaded = false;
+  let browserDownloadMode = false;
   let downloadFolderPromptShown = false;
   const playedTrackDownloads = new Map();
   $: downloadFolderReady =
@@ -392,6 +394,7 @@
   let appUpdateChecking = false;
   let appUpdateStatus = "";
   let localFolders = [];
+  let localFolderInput;
   let localUploadCache = (() => {
     try {
       return JSON.parse(
@@ -603,8 +606,8 @@
     localStorage.getItem("wavelength-play-events") || "[]",
   );
   let statsPeriod = "all";
-  let spotifyClientId =
-    localStorage.getItem("wavelength-spotify-client-id") || "";
+  const spotifyClientId = "6e2ca58467e84ea5bf33b328d553c1b9";
+  localStorage.removeItem("wavelength-spotify-client-id");
   let spotifyConnected =
     localStorage.getItem("wavelength-spotify-connected") === "true";
   let spotifyProfile = null;
@@ -744,30 +747,37 @@
         .flatMap((key) =>
           Array.isArray(entries.get(key)) ? entries.get(key) : [],
         );
-      const handles = hasAppFolders
+      const savedFolders = hasAppFolders
         ? appHandles
         : [
             ...new Map(
               legacyHandles.map((handle) => [handle.name, handle]),
             ).values(),
           ];
-      if (!hasAppFolders && handles.length) {
+      if (!hasAppFolders && savedFolders.length) {
         const transaction = database.transaction("folders", "readwrite");
-        transaction.objectStore("folders").put(handles, appFoldersKey);
+        transaction.objectStore("folders").put(savedFolders, appFoldersKey);
         await idbTransaction(transaction);
       }
-      localFolders = handles.map((handle) => ({ name: handle.name, handle }));
+      localFolders = savedFolders.map((folder) =>
+        folder?.kind === "file-list"
+          ? folder
+          : { name: folder.name, handle: folder.handle || folder },
+      );
+      await reloadImportedTracks();
     } catch {
       notice = "Could not load saved folders.";
     }
   }
 
-  async function saveFolders() {
+  async function saveFolders(folders = localFolders) {
     if (!window.indexedDB) return;
     const database = await folderDatabase();
     const transaction = database.transaction("folders", "readwrite");
     transaction.objectStore("folders").put(
-      localFolders.map((folder) => folder.handle),
+      folders.map((folder) =>
+        folder.kind === "file-list" ? folder : folder.handle,
+      ),
       appFoldersKey,
     );
     await idbTransaction(transaction);
@@ -784,6 +794,7 @@
       } catch {
         downloadDirectoryName = "";
       } finally {
+        browserDownloadMode = false;
         downloadDirectoryLoaded = true;
       }
       return;
@@ -800,12 +811,19 @@
         .get(`downloads:${username || "guest"}`);
       await new Promise((resolve) => {
         request.onsuccess = () => {
-          downloadDirectoryHandle = request.result || null;
-          downloadDirectoryName = downloadDirectoryHandle?.name || "";
+          browserDownloadMode =
+            request.result?.kind === "browser-downloads";
+          downloadDirectoryHandle = browserDownloadMode
+            ? null
+            : request.result || null;
+          downloadDirectoryName = browserDownloadMode
+            ? "Browser downloads"
+            : downloadDirectoryHandle?.name || "";
           downloadDirectoryLoaded = true;
           resolve();
         };
         request.onerror = () => {
+          browserDownloadMode = false;
           downloadDirectoryLoaded = true;
           resolve();
         };
@@ -820,6 +838,7 @@
       try {
         const directory = await invoke("choose_download_directory");
         if (!directory) return;
+        browserDownloadMode = false;
         downloadDirectoryName =
           directory.split(/[\\/]/).filter(Boolean).at(-1) || directory;
         downloadDirectoryLoaded = true;
@@ -831,16 +850,32 @@
       }
       return;
     }
-    if (!window.isSecureContext) {
-      notice = "Folder access requires HTTPS or this device's localhost address.";
-      return;
-    }
     if (!window.indexedDB) {
       notice = "Folder access is unavailable in this browser.";
       return;
     }
     if (!window.showDirectoryPicker) {
-      notice = "Choose a downloads folder using Chrome or Edge.";
+      try {
+        const database = await folderDatabase();
+        const transaction = database.transaction("folders", "readwrite");
+        transaction
+          .objectStore("folders")
+          .put({ kind: "browser-downloads" }, `downloads:${username || "guest"}`);
+        await idbTransaction(transaction);
+        downloadDirectoryHandle = null;
+        browserDownloadMode = true;
+        downloadDirectoryName = "Browser downloads";
+        downloadDirectoryLoaded = true;
+        downloadFolderPromptShown = false;
+        notice =
+          "Firefox uses its configured download location. Use Wavelength Desktop to choose a custom folder; change Firefox's location in Settings > General > Files and Applications.";
+      } catch (error) {
+        notice = error.message || "Could not enable browser downloads.";
+      }
+      return;
+    }
+    if (!window.isSecureContext) {
+      notice = "Folder access requires HTTPS or this device's localhost address.";
       return;
     }
     try {
@@ -856,6 +891,7 @@
         transaction.onabort = () => reject(transaction.error);
       });
       downloadDirectoryHandle = handle;
+      browserDownloadMode = false;
       downloadDirectoryName = handle.name;
       downloadDirectoryLoaded = true;
       downloadFolderPromptShown = false;
@@ -868,7 +904,47 @@
     }
   }
 
+  async function createImportedTrack(file, folderPath) {
+    if (!/\.(mp3|flac|m4a|ogg|wav|aac)$/i.test(file.name)) return null;
+    let metadata = null;
+    try {
+      metadata = await parseBlob(file);
+    } catch {}
+    const duration = metadata?.format.duration;
+    const id = `local-${folderPath}-${file.name}`;
+    const fingerprint = `${file.size}:${file.lastModified}`;
+    const upload = localUploadCache[id];
+    return {
+      id,
+      title: metadata?.common.title || file.name.replace(/\.[^.]+$/, ""),
+      artist:
+        metadata?.common.artist ||
+        metadata?.common.albumartist ||
+        "Local file",
+      album: metadata?.common.album || "",
+      length: duration ? formatTime(duration) : "—",
+      color: "#718979",
+      folderPath,
+      file,
+      serverAudioId:
+        upload?.fingerprint === fingerprint &&
+        Date.now() - upload.uploadedAt < 7 * 24 * 60 * 60 * 1000
+          ? upload.audioId
+          : "",
+    };
+  }
+
   async function scanFolder(folder, requestAccess = false) {
+    if (folder.kind === "file-list") {
+      const found = [];
+      for (const entry of folder.files) {
+        const segments = entry.relativePath.split(/[\\/]/).filter(Boolean);
+        const folderPath = [folder.name, ...segments.slice(1, -1)].join("/");
+        const track = await createImportedTrack(entry.file, folderPath);
+        if (track) found.push(track);
+      }
+      return found;
+    }
     let permission = await folder.handle.queryPermission?.({ mode: "read" });
     if (permission !== "granted" && requestAccess)
       permission = await folder.handle.requestPermission?.({ mode: "read" });
@@ -884,34 +960,9 @@
           await scanDirectory(entry, `${folderPath}/${entry.name}`);
           continue;
         }
-        if (!/\.(mp3|flac|m4a|ogg|wav|aac)$/i.test(entry.name)) continue;
         const file = await entry.getFile();
-        let metadata = null;
-        try {
-          metadata = await parseBlob(file);
-        } catch {}
-        const duration = metadata?.format.duration;
-        const id = `local-${folderPath}-${entry.name}`;
-        const fingerprint = `${file.size}:${file.lastModified}`;
-        const upload = localUploadCache[id];
-        found.push({
-          id,
-          title: metadata?.common.title || entry.name.replace(/\.[^.]+$/, ""),
-          artist:
-            metadata?.common.artist ||
-            metadata?.common.albumartist ||
-            "Local file",
-          album: metadata?.common.album || "",
-          length: duration ? formatTime(duration) : "—",
-          color: "#718979",
-          folderPath,
-          file,
-          serverAudioId:
-            upload?.fingerprint === fingerprint &&
-            Date.now() - upload.uploadedAt < 7 * 24 * 60 * 60 * 1000
-              ? upload.audioId
-              : "",
-        });
+        const track = await createImportedTrack(file, folderPath);
+        if (track) found.push(track);
       }
     }
     await scanDirectory(folder.handle, folder.name);
@@ -963,6 +1014,7 @@
   function restoreLastPlayback() {
     let snapshot;
     try {
+      if (localStorage.getItem("wavelength-playback-ended") === "true") return;
       snapshot = JSON.parse(
         localStorage.getItem("wavelength-last-playback") || "null",
       );
@@ -1365,6 +1417,7 @@
       track.thumbnail ||
       track.albumArt ||
       track.artwork ||
+      track.album?.images?.[0]?.url ||
       track.poster ||
       track.photo ||
       ""
@@ -2175,7 +2228,7 @@
       uiScaleMaximum,
       Math.max(
         uiScaleMinimum,
-        Math.round((uiScale + direction * 0.1) * 100) / 100,
+        Math.round((uiScale + direction * uiScaleStep) * 100) / 100,
       ),
     );
     applyUiScale();
@@ -2643,18 +2696,10 @@
       void completeSpotifyWebRedirect().catch((error) => {
         notice = error?.message || "Spotify sign-in could not be completed.";
       });
-    } else if (spotifyClientId) {
+    } else {
       void restoreStandaloneSpotifySession().catch((error) => {
         notice = error?.message || "Spotify could not be restored.";
       });
-    } else if (spotifyConnected || spotifyResult === "connected") {
-      spotifyConnected = false;
-      spotifyProfile = null;
-      spotifyPlaylists = [];
-      spotifySavedTracks = [];
-      localStorage.removeItem("wavelength-spotify-connected");
-      if (spotifyResult === "connected")
-        notice = "Enter a Spotify Client ID in Settings to use Spotify OAuth.";
     }
     const overflowRoot = document.getElementById("app") || contentInner;
     const resizeObserver = new ResizeObserver(() => {
@@ -2718,10 +2763,6 @@
     const roomRequest = path.startsWith("/parties");
     const localAudioRequest = isLocalPlayer() && path.startsWith("/audio/");
     if (path.startsWith("/spotify/")) {
-      if (!spotifyClientId.trim())
-        throw new Error(
-          "Enter a Spotify Client ID in Settings to use Spotify OAuth.",
-        );
       return spotifyApiForAppPath(path, options);
     }
     if (roomRequest && !roomServerUrl)
@@ -3081,12 +3122,19 @@
   async function installPendingAppUpdate() {
     if (!pendingDesktopUpdate || appUpdateInstalling) return;
     appUpdateInstalling = true;
-    appUpdateStatus = `Installing version ${pendingDesktopUpdate.version}`;
+    appUpdateStatus = `Downloading version ${pendingDesktopUpdate.version}`;
     try {
-      await pendingDesktopUpdate.downloadAndInstall();
+      await pendingDesktopUpdate.download();
+      appUpdateStatus = "Stopping the local service";
+      await invoke("stop_local_services");
+      appUpdateStatus = `Installing version ${pendingDesktopUpdate.version}`;
+      await pendingDesktopUpdate.install();
       await relaunch();
     } catch (error) {
-      appUpdateStatus = error.message || "Update installation failed";
+      appUpdateStatus =
+        typeof error === "string"
+          ? error
+          : error?.message || "Update installation failed";
       notice = appUpdateStatus;
       showAppUpdatePrompt = false;
       pendingDesktopUpdate = null;
@@ -3204,10 +3252,10 @@
       verifier,
       challenge: encodeBase64Url(digest),
       state: randomSpotifyValue(48),
-      clientId: spotifyClientId.trim(),
+      clientId: spotifyClientId,
       redirectUri: isTauri()
         ? "http://127.0.0.1:43821/callback"
-        : `${window.location.origin}${window.location.pathname}`,
+        : `${window.location.origin}/settings`,
     };
   }
 
@@ -3239,7 +3287,7 @@
         body: new URLSearchParams({
           grant_type: "refresh_token",
           refresh_token: refreshToken,
-          client_id: spotifyClientId.trim(),
+          client_id: spotifyClientId,
         }),
       });
       const data = await response.json();
@@ -3445,14 +3493,13 @@
     )
       throw new Error("Spotify returned incomplete sign-in credentials.");
 
-    spotifyClientId = flow.clientId;
     spotifyAccessToken = data.access_token;
     spotifyAccessTokenExpiresAt =
       Date.now() + Math.max(0, Number(data.expires_in) || 3600) * 1000;
     await persistSpotifyRefreshToken(data.refresh_token);
-    const profile = await fetchSpotifyData(true);
-    if (!profile) throw new Error("Spotify profile data could not be loaded.");
-    return profile;
+    spotifyConnected = true;
+    localStorage.setItem("wavelength-spotify-connected", "true");
+    return fetchSpotifyData(true);
   }
 
   async function completeSpotifyOAuth(code, flow) {
@@ -3505,8 +3552,9 @@
     }
     try {
       await getSpotifyAccessToken();
-      const profile = await fetchSpotifyData();
-      if (!profile) throw new Error("Spotify profile data could not be loaded.");
+      spotifyConnected = true;
+      localStorage.setItem("wavelength-spotify-connected", "true");
+      await fetchSpotifyData();
     } catch (error) {
       spotifyAccessToken = "";
       spotifyAccessTokenExpiresAt = 0;
@@ -3519,50 +3567,42 @@
     }
   }
 
-  function saveSpotifyClientId() {
-    const previousClientId =
-      localStorage.getItem("wavelength-spotify-client-id") || "";
-    spotifyClientId = spotifyClientId.trim();
-    localStorage.setItem("wavelength-spotify-client-id", spotifyClientId);
-    if (previousClientId === spotifyClientId) return;
-
-    spotifyAccessToken = "";
-    spotifyAccessTokenExpiresAt = 0;
-    spotifyConnected = false;
-    spotifyProfile = null;
-    spotifyPlaylists = [];
-    spotifySavedTracks = [];
-    localStorage.removeItem("wavelength-spotify-connected");
-    void persistSpotifyRefreshToken(null).catch((error) => {
-      notice = `Spotify credentials could not be cleared: ${error.message}`;
-    });
-    notice = "Spotify Client ID saved. Connect Spotify to continue.";
-  }
-
   async function fetchSpotifyData(announce = false) {
+    let profile;
     try {
-      const profile = await api("/spotify/me");
+      profile = await api("/spotify/me");
       if (!profile.id)
         throw new Error(profile.error?.message || "Spotify connection failed.");
-      spotifyProfile = profile;
-      spotifyConnected = true;
-      localStorage.setItem("wavelength-spotify-connected", "true");
-      const unavailablePlaylistCount = await fetchSpotifyLibrary();
-      if (announce)
-        notice = `Spotify connected as ${profile.display_name || profile.id}.`;
-      if (unavailablePlaylistCount) {
-        notice = `Spotify denied access to tracks in ${unavailablePlaylistCount} playlist${unavailablePlaylistCount === 1 ? "" : "s"}.`;
-      }
-      return profile;
     } catch (error) {
-      spotifyConnected = false;
       spotifyProfile = null;
-      spotifyPlaylists = [];
-      spotifySavedTracks = [];
-      localStorage.removeItem("wavelength-spotify-connected");
-      if (announce) notice = error.message || "Spotify connection failed.";
+      if (announce) {
+        const message =
+          typeof error === "string" ? error : error?.message || "Unknown error";
+        notice = `Spotify is linked, but account details could not be loaded: ${message}`;
+      }
       return null;
     }
+
+    spotifyProfile = profile;
+    spotifyConnected = true;
+    localStorage.setItem("wavelength-spotify-connected", "true");
+    if (announce)
+      notice = `Spotify connected as ${profile.display_name || profile.id}.`;
+    try {
+      const unavailablePlaylistCount = await fetchSpotifyLibrary();
+      if (unavailablePlaylistCount) {
+        notice = `Spotify only exposes playlist tracks to owners and collaborators. ${unavailablePlaylistCount} playlist${unavailablePlaylistCount === 1 ? " was" : "s were"} skipped.`;
+      }
+    } catch (error) {
+      spotifyPlaylists = [];
+      spotifySavedTracks = [];
+      if (announce) {
+        const message =
+          typeof error === "string" ? error : error?.message || "Unknown error";
+        notice = `Spotify connected, but the library could not be loaded: ${message}`;
+      }
+    }
+    return profile;
   }
 
   function normalizeSpotifyTrack(track) {
@@ -3615,15 +3655,7 @@
     if (pendingInviteCode)
       localStorage.setItem("wavelength-pending-invite", pendingInviteCode);
 
-    if (!spotifyClientId.trim()) {
-      notice = "Enter a Spotify Client ID in Settings to use Spotify OAuth.";
-      navigate("/settings");
-      return;
-    }
-
     try {
-      if (!/^[A-Za-z0-9]{16,64}$/.test(spotifyClientId.trim()))
-        throw new Error("Enter a valid Spotify Client ID in Settings.");
       const flow = await createSpotifyPkceFlow();
       if (isTauri()) {
         pendingSpotifyOAuth = flow;
@@ -3709,9 +3741,12 @@
   }
 
   async function chooseLocalFolder() {
-    if (!window.indexedDB || !window.showDirectoryPicker) {
-      notice =
-        "Folder access is not supported in this browser. Use Chrome or Edge.";
+    if (!window.indexedDB) {
+      notice = "Folder access is unavailable in this browser.";
+      return;
+    }
+    if (!window.showDirectoryPicker) {
+      localFolderInput?.click();
       return;
     }
     try {
@@ -3726,6 +3761,39 @@
       notice = `${directory.name} is now part of your imported library.`;
     } catch (error) {
       if (error?.name !== "AbortError") notice = "Could not open that folder.";
+    }
+  }
+
+  async function importLocalFolderFiles(event) {
+    const input = event.currentTarget;
+    const files = Array.from(input.files || []).filter((file) =>
+      /\.(mp3|flac|m4a|ogg|wav|aac)$/i.test(file.name),
+    );
+    input.value = "";
+    if (!files.length) return;
+
+    const firstPath =
+      files[0].webkitRelativePath || files[0].name || "Music";
+    const folderName = firstPath.split("/")[0] || "Music";
+    const importedFiles = files.map((file) => ({
+      file,
+      relativePath: file.webkitRelativePath || `${folderName}/${file.name}`,
+    }));
+    const nextFolders = [
+      ...localFolders.filter((folder) => folder.name !== folderName),
+      { kind: "file-list", name: folderName, files: importedFiles },
+    ];
+
+    try {
+      await saveFolders(nextFolders);
+      localFolders = nextFolders;
+      await reloadImportedTracks();
+      notice = `${folderName} was imported. Add it again to refresh its files.`;
+    } catch (error) {
+      notice =
+        error?.name === "QuotaExceededError"
+          ? "This folder is too large for the browser's available storage."
+          : error?.message || "Could not import that folder.";
     }
   }
 
@@ -3773,14 +3841,15 @@
   }
 
   async function rescanLocalFolders() {
-    if (!window.indexedDB || !window.showDirectoryPicker) {
-      notice =
-        "Folder access is not supported in this browser. Use Chrome or Edge.";
+    if (!window.indexedDB) {
+      notice = "Folder access is unavailable in this browser.";
       return;
     }
     try {
       await reloadImportedTracks(true);
-      notice = "Imported folders refreshed.";
+      notice = localFolders.some((folder) => folder.kind === "file-list")
+        ? "Imported folders refreshed. Add a Firefox folder again to include new files."
+        : "Imported folders refreshed.";
     } catch (error) {
       notice =
         error?.name === "NotAllowedError" ||
@@ -3891,29 +3960,45 @@
         data.tracks ||
         data.items ||
         []
-      ).map((item, index) => ({
-        ...item,
-        id:
-          item.id ||
-          item.videoId ||
-          `${source}-${offset + index}-${String(
-            item.title || item.name || "track",
-          )
-            .toLowerCase()
-            .replace(/[^a-z0-9]+/g, "-")}`,
-        title: item.title || item.name,
-        artist: item.artist || item.artists?.[0]?.name || "Unknown artist",
-        album: item.album || item.album_name || data.playlist?.name || "",
-        length:
-          item.length ||
-          (item.duration
-            ? `${Math.floor(item.duration / 60)}:${String(Math.floor(item.duration % 60)).padStart(2, "0")}`
-            : "—"),
-        color: item.color || "#718979",
-        art: getTrackArt(item),
-        source: item.source || source,
-        mediaType: item.mediaType || item.type || "track",
-      }));
+      ).map((item, index) => {
+        const durationSeconds =
+          Number(item.duration) || Number(item.duration_ms) / 1000;
+        return {
+          ...item,
+          id:
+            item.id ||
+            item.videoId ||
+            `${source}-${offset + index}-${String(
+              item.title || item.name || "track",
+            )
+              .toLowerCase()
+              .replace(/[^a-z0-9]+/g, "-")}`,
+          title: item.title || item.name,
+          artist:
+            item.artist ||
+            item.artists
+              ?.map((artist) =>
+                typeof artist === "string" ? artist : artist?.name,
+              )
+              .filter(Boolean)
+              .join(", ") ||
+            "Unknown artist",
+          album:
+            (typeof item.album === "string" ? item.album : item.album?.name) ||
+            item.album_name ||
+            data.playlist?.name ||
+            "",
+          length:
+            item.length ||
+            (durationSeconds > 0
+              ? `${Math.floor(durationSeconds / 60)}:${String(Math.floor(durationSeconds % 60)).padStart(2, "0")}`
+              : "—"),
+          color: item.color || "#718979",
+          art: getTrackArt(item),
+          source: item.source || source,
+          mediaType: item.mediaType || item.type || "track",
+        };
+      });
       const localIds = new Set(localMatches.map((track) => track.id));
       const pageResults = [
         ...localMatches,
@@ -4054,7 +4139,37 @@
   function chooseTopbarSuggestion(track) {
     if (!downloadFolderReady) return;
     topbarSearchOpen = false;
-    playTrack(track);
+    playSearchResult(track);
+  }
+
+  function playSearchResult(track) {
+    if (!track || !downloadFolderReady) return;
+    if (joinedParty && partyRole === "guest") {
+      void playTrack(track);
+      return;
+    }
+
+    const replacedTrack = playing;
+    queue = [
+      track,
+      ...queue.filter(
+        (item) => item.id !== track.id && item.id !== playing?.id,
+      ),
+    ];
+    if (replacedTrack && replacedTrack.id !== track.id) {
+      removedQueueHistory = [
+        ...removedQueueHistory.filter(
+          (item) => item.id !== replacedTrack.id,
+        ),
+        replacedTrack,
+      ].slice(-50);
+    }
+    removedQueueHistory = removedQueueHistory.filter(
+      (item) => item.id !== track.id,
+    );
+    localStorage.setItem("wavelength-queue", JSON.stringify(queue));
+    schedulePartyStatePublish();
+    void playTrack(track);
   }
 
   function handleTopbarSearchInput() {
@@ -4823,6 +4938,7 @@
     } = {},
   ) {
     if (!track) return;
+    localStorage.removeItem("wavelength-playback-ended");
     if (
       broadcast &&
       sendPartyCommand(
@@ -4958,14 +5074,40 @@
   }
 
   function nextTrack() {
-    if (sendPartyCommand("next-track", {}, "canControlPlayback")) return;
+    if (sendPartyCommand("next-track", {}, "canControlPlayback")) return true;
     const source = queueSource();
-    if (!source.length) return;
+    if (!source.length) return false;
     const target = resolveNextTrack(1);
+    removePlayedFromQueue(playing);
     if (target && target.id !== playing?.id) {
-      removePlayedFromQueue(playing);
       playTrack(target);
+      return true;
     }
+    return false;
+  }
+
+  function clearFinishedPlayback() {
+    playbackRequestId += 1;
+    playbackRequestPending = false;
+    pendingHistoryTrack = null;
+    playing = null;
+    isPlaying = false;
+    currentTime = 0;
+    duration = 0;
+    pendingPlaybackSeek = null;
+    activeLyricIndex = -1;
+    lyricsFullscreen = false;
+    lyrics = "";
+    syncedLyricLines = [];
+    if (audioUrl?.startsWith("blob:")) URL.revokeObjectURL(audioUrl);
+    audioUrl = "";
+    audioElement?.pause();
+    audioElement?.removeAttribute("src");
+    audioElement?.load();
+    localStorage.removeItem("wavelength-last-playback");
+    localStorage.setItem("wavelength-playback-ended", "true");
+    lastPlaybackPersistedAt = 0;
+    schedulePartyStatePublish();
   }
 
   function handleAudioEnded() {
@@ -4999,11 +5141,12 @@
       return;
     }
     removePlayedFromQueue(playing);
-    if (repeatMode === "all") nextTrack();
-    else {
-      isPlaying = false;
-      schedulePartyStatePublish();
-    }
+    if (
+      (repeatMode === "all" || queue.length > 0) &&
+      nextTrack()
+    )
+      return;
+    clearFinishedPlayback();
   }
 
   function parseSyncedLyrics(value) {
@@ -5213,7 +5356,10 @@
 
   function savePlayedTrack(track) {
     if (!isQueueDownloadable(track)) return;
-    if (!downloadFolderReady || (!isTauri() && !downloadDirectoryHandle)) {
+    if (
+      !downloadFolderReady ||
+      (!isTauri() && !downloadDirectoryHandle && !browserDownloadMode)
+    ) {
       if (!downloadFolderPromptShown) {
         notice = "Choose a download folder in Settings to save played songs.";
         downloadFolderPromptShown = true;
@@ -5228,6 +5374,17 @@
     playedTrackDownloads.set(trackId, pendingDownload);
   }
 
+  function triggerBrowserDownload(url, filename = "") {
+    const link = document.createElement("a");
+    link.href = url;
+    if (filename) link.download = filename;
+    document.body.append(link);
+    link.click();
+    link.remove();
+    if (url.startsWith("blob:"))
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
   async function downloadTrack(track, { automatic = false } = {}) {
     if (!downloadFolderReady) {
       if (!automatic)
@@ -5237,6 +5394,15 @@
     try {
       if (track.file) {
         if (!isTauri()) {
+          if (browserDownloadMode) {
+            triggerBrowserDownload(
+              URL.createObjectURL(track.file),
+              track.file.name,
+            );
+            if (!automatic)
+              notice = `${track.file.name} sent to browser downloads.`;
+            return;
+          }
           if (!downloadDirectoryHandle) {
             notice = "Set a downloads folder in Settings before downloading.";
             navigate("/settings");
@@ -5286,6 +5452,12 @@
       }
       const downloadUrl = `${isTauri() ? await localAudioBase() : "/api/audio"}/download/${encodeURIComponent(trackId)}?code=solo`;
       if (!isTauri()) {
+        if (browserDownloadMode) {
+          triggerBrowserDownload(downloadUrl);
+          if (!automatic)
+            notice = `${track.title || "Track"} sent to browser downloads.`;
+          return;
+        }
         if (!downloadDirectoryHandle) {
           notice = "Set a downloads folder in Settings before downloading.";
           navigate("/settings");
@@ -6917,52 +7089,29 @@
                   {#if topbarSuggestions.length}
                     {#each topbarSuggestions as track}
                       <div class="topbar-search-result">
-                        <button
-                          class="topbar-search-result-main"
-                          type="button"
-                          disabled={!downloadFolderReady}
-                          on:click={() => chooseTopbarSuggestion(track)}
+                        <span
+                          class="mini-art"
+                          style={`--art-color:${track.color || "#718979"}`}
+                          >{#if getTrackArt(track)}<img
+                              src={getTrackArt(track)}
+                              alt=""
+                            />{:else}<Disc3 size={16} />{/if}</span
                         >
-                          <span
-                            class="mini-art"
-                            style={`--art-color:${track.color || "#718979"}`}
-                            >{#if getTrackArt(track)}<img
-                                src={getTrackArt(track)}
-                                alt=""
-                              />{:else}<Disc3 size={16} />{/if}</span
-                          >
-                          <span class="topbar-search-copy"
-                            ><strong>{track.title}</strong><small
-                              >{track.artist} · {getTrackSource(track)}</small
-                            ></span
-                          >
-                        </button>
+                        <span class="topbar-search-copy"
+                          ><strong>{track.title}</strong><small
+                            >{track.artist} · {getTrackSource(track)}</small
+                          ></span
+                        >
                         <span class="topbar-search-length"
                           >{track.length || ""}</span
                         >
                         <button
-                          class="icon-button topbar-search-queue"
+                          class="icon-button topbar-search-play"
                           type="button"
                           disabled={!downloadFolderReady}
-                          on:click={(event) => {
-                            event.stopPropagation();
-                            void addToQueue(track);
-                            topbarSearchOpen = false;
-                          }}
-                          aria-label={`Add ${track.title} to queue`}
-                          title="Add to queue"><ListMusic size={16} /></button
-                        >
-                        <button
-                          class="icon-button topbar-search-queue"
-                          type="button"
-                          disabled={!downloadFolderReady}
-                          on:click={(event) => {
-                            event.stopPropagation();
-                            void downloadTrack(track);
-                            topbarSearchOpen = false;
-                          }}
-                          aria-label={`Download ${track.title}`}
-                          title="Download song"><Download size={16} /></button
+                          on:click={() => chooseTopbarSuggestion(track)}
+                          aria-label={`Play ${track.title}`}
+                          title="Play now"><Play size={16} /></button
                         >
                       </div>
                     {/each}
@@ -7226,7 +7375,7 @@
               onMobileSearchSourceChange={handleMobileSearchSourceChange}
               onMobileSearchInput={handleMobileSearchInput}
               onSearch={() => runSearch({ limit: 10 })}
-              onPlay={playTrack}
+              onPlay={playSearchResult}
               onContextMenu={showContextMenu}
               onPointerDown={handleSongPointerDown}
               onPointerUp={handleSongTouchEnd}
@@ -7273,8 +7422,9 @@
             <SettingsPage
               {spotifyConnected}
               {spotifyProfile}
-              bind:spotifyClientId
               {downloadDirectoryName}
+              {browserDownloadMode}
+              browserFolderPickerSupported={isTauri() || Boolean(window.showDirectoryPicker)}
               tauriAvailable={isTauri()}
               {appVersion}
               {appUpdateChecking}
@@ -7289,7 +7439,6 @@
               {mobileViewport}
               onDisconnectSpotify={disconnectSpotify}
               onConnectSpotify={connectSpotify}
-              onSaveSpotifyClientId={saveSpotifyClientId}
               onOpenFolderManager={openFolderManager}
               onChooseDownloadDirectory={chooseDownloadDirectory}
               onNavigate={navigate}
@@ -7539,8 +7688,21 @@
               title="Rescan folders"><RefreshCw size={18} /></button
             >
           </div>
-          <p>Saved on this device for Wavelength</p>
+          <p>
+            Saved on this device for Wavelength. Firefox imports a snapshot;
+            add the folder again to refresh its files.
+          </p>
         </div>
+        <input
+          bind:this={localFolderInput}
+          type="file"
+          webkitdirectory
+          directory
+          multiple
+          accept="audio/*,.flac,.ogg"
+          hidden
+          on:change={importLocalFolderFiles}
+        />
         <div class="folder-list">
           {#if localFolders.length}{#each localFolders as folder}<div
                 class="folder-row"

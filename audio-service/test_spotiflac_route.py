@@ -11,6 +11,31 @@ import main
 
 
 class SpotiFLACRouteTests(unittest.IsolatedAsyncioTestCase):
+    async def test_async_client_uses_legacy_single_track_api_when_report_api_is_unavailable(self):
+        requested = []
+
+        class FakeClient:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_):
+                return None
+
+            async def download_track(self, url):
+                requested.append(url)
+                return []
+
+        with patch.object(main, "AsyncSpotiFLAC", return_value=FakeClient()):
+            result = await main._run_spotiflac_download(
+                url="https://open.spotify.com/track/test",
+                output_dir="downloads",
+                services=["qobuz"],
+                use_extensions_fallback=False,
+            )
+
+        self.assertEqual(result, [])
+        self.assertEqual(requested, ["https://open.spotify.com/track/test"])
+
     async def test_qobuz_settings_forward_all_credentials_without_echoing_them(self):
         calls = []
 
@@ -61,11 +86,12 @@ class SpotiFLACRouteTests(unittest.IsolatedAsyncioTestCase):
         track_id = "test-spotify-track-2026"
         calls = []
 
-        def fake_spotiflac(**kwargs):
+        async def fake_spotiflac(**kwargs):
             calls.append(kwargs)
             output_dir = Path(kwargs["output_dir"])
             output_dir.mkdir(parents=True, exist_ok=True)
             (output_dir / "matched.flac").write_bytes(b"audio")
+            return SimpleNamespace(failed=[], skipped=[])
 
         with tempfile.TemporaryDirectory() as temp_dir:
             cache_dir = Path(temp_dir) / "cache"
@@ -76,7 +102,7 @@ class SpotiFLACRouteTests(unittest.IsolatedAsyncioTestCase):
                 patch.object(main, "LOG_FILE", cache_dir / "logs.json"),
                 patch.object(main, "QOBUZ_API_URL", "http://qobuz.test"),
                 patch.object(main, "DOWNLOAD_DELAY_SECONDS", 0),
-                patch.object(main, "SpotiFLAC", side_effect=fake_spotiflac),
+                patch.object(main, "_run_spotiflac_download", side_effect=fake_spotiflac),
                 patch.object(main, "_record_download_event"),
             ):
                 result = await main._download_audio(track_id)
@@ -95,11 +121,12 @@ class SpotiFLACRouteTests(unittest.IsolatedAsyncioTestCase):
         track_id = "test-spotify-track-qobuz"
         calls = []
 
-        def fake_spotiflac(**kwargs):
+        async def fake_spotiflac(**kwargs):
             calls.append(kwargs)
             output_dir = Path(kwargs["output_dir"])
             output_dir.mkdir(parents=True, exist_ok=True)
             (output_dir / "matched.flac").write_bytes(b"audio")
+            return SimpleNamespace(failed=[], skipped=[])
 
         with tempfile.TemporaryDirectory() as temp_dir:
             cache_dir = Path(temp_dir) / "cache"
@@ -115,7 +142,7 @@ class SpotiFLACRouteTests(unittest.IsolatedAsyncioTestCase):
                     "user_token": "test-token",
                 }),
                 patch.object(main, "DOWNLOAD_DELAY_SECONDS", 0),
-                patch.object(main, "SpotiFLAC", side_effect=fake_spotiflac),
+                patch.object(main, "_run_spotiflac_download", side_effect=fake_spotiflac),
                 patch.object(main, "_record_download_event"),
             ):
                 result = await main._download_audio(track_id)
@@ -127,6 +154,31 @@ class SpotiFLACRouteTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls[0]["qobuz_token"], "test-token")
         self.assertFalse(calls[0]["allow_fallback"])
         self.assertFalse(calls[0]["use_extensions_fallback"])
+
+    async def test_spotiflac_provider_failure_is_reported_instead_of_generic_no_audio(self):
+        async def fake_spotiflac(**_kwargs):
+            return SimpleNamespace(
+                failed=[
+                    SimpleNamespace(provider="qobuz", reason="provider unavailable")
+                ],
+                skipped=[],
+            )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cache_dir = Path(temp_dir) / "cache"
+            cache_dir.mkdir()
+            with (
+                patch.object(main, "CACHE_DIR", cache_dir),
+                patch.object(main, "STATUS_FILE", cache_dir / "status.json"),
+                patch.object(main, "LOG_FILE", cache_dir / "logs.json"),
+                patch.object(main, "DOWNLOAD_DELAY_SECONDS", 0),
+                patch.object(main, "_run_spotiflac_download", side_effect=fake_spotiflac),
+                patch.object(main, "_record_download_event"),
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError, "qobuz: provider unavailable"
+                ):
+                    await main._download_audio("test-spotify-track-failure")
 
 
 if __name__ == "__main__":

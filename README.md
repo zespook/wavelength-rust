@@ -35,7 +35,7 @@ Start the web app and its local Qobuz/audio services:
 npm run dev
 ```
 
-The app is available at `http://127.0.0.1:5173`. The launcher starts the local Qobuz API on port `8000` and audio service on port `8787`; it installs service Python dependencies into a virtual environment when needed. Spotify account search works after direct Spotify sign-in. The audio service's catalog search still uses Spotify client credentials in the repository `.env`; YouTube search does not.
+The app is available at `http://127.0.0.1:5173`. The launcher starts the local Qobuz API on port `8000` and audio service on port `8787`; it installs service Python dependencies into a virtual environment when needed. Spotify account search works after direct Spotify sign-in. The audio service's separate catalog search uses Spotify client credentials in the repository `.env`; those credentials are not needed to link an account. YouTube search does not require Spotify credentials.
 
 To run the desktop app instead, from `svelte-frontend` run:
 
@@ -53,7 +53,7 @@ The installer is written to `svelte-frontend/src-tauri/target/release/bundle/nsi
 
 ## Connect Spotify directly
 
-Spotify can be connected without the self-hosted room server. Create an app in the [Spotify Developer Dashboard](https://developer.spotify.com/dashboard), then enter its Client ID in Wavelength Settings; a client secret is not needed. Add `http://127.0.0.1:43821/callback` to the app's Redirect URIs for the desktop client. A web deployment must also add its exact app URL as a Redirect URI. Sign-in uses PKCE in the system browser, and Spotify profile, saved tracks, playlists, and search results are loaded directly from Spotify.
+Spotify can be connected without the self-hosted room server or per-user setup. Wavelength includes its public Spotify Client ID and uses PKCE; no client secret is needed or included. The Spotify app owner must register the exact Redirect URIs used by the app: `http://127.0.0.1:43821/callback` for desktop, `http://127.0.0.1:5173/settings` for Vite development, and `http://127.0.0.1:4173/settings` for Vite preview. A web deployment must also register its exact `/settings` URL. Sign-in opens Spotify in the system browser, and account data is loaded directly from Spotify.
 
 ## Release versions
 
@@ -61,7 +61,7 @@ Push a semantic version tag such as `v1.2.3` to build a desktop release. The rel
 
 ## Run the self-hosted server with Docker
 
-Dockerfiles and Compose manifests are intentionally not included. The following Bash instructions build the Rust room API using an inline Dockerfile and run it with MongoDB. From the repository root, copy `.env.example` to `.env`, then set `ROOM_SERVER_PASSCODE` to a unique value of at least 16 characters. The Wavelength app uses direct Spotify OAuth with the Client ID configured in Settings; the room server is not involved in Spotify sign-in.
+Dockerfiles and Compose manifests are intentionally not included. The following Bash instructions build the Rust room API using an inline Dockerfile and run it with MongoDB. From the repository root, copy `.env.example` to `.env`, then set `ROOM_SERVER_PASSCODE` to a unique value of at least 16 characters. Wavelength uses direct Spotify OAuth with its bundled public Client ID; the room server is not involved in Spotify sign-in.
 
 Build the backend image:
 

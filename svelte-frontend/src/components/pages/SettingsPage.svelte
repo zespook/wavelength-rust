@@ -3,8 +3,9 @@
 
     export let spotifyConnected = false;
     export let spotifyProfile = null;
-    export let spotifyClientId = "";
     export let downloadDirectoryName = "";
+    export let browserDownloadMode = false;
+    export let browserFolderPickerSupported = true;
     export let tauriAvailable = false;
     export let appVersion = "Web app";
     export let appUpdateChecking = false;
@@ -21,7 +22,6 @@
     export let mobileViewport = false;
     export let onDisconnectSpotify;
     export let onConnectSpotify;
-    export let onSaveSpotifyClientId;
     export let onOpenFolderManager;
     export let onChooseDownloadDirectory;
     export let onNavigate;
@@ -35,11 +35,16 @@
     <section class="settings-list" aria-label="Settings">
         <div class="settings-row">
             <div class="settings-row-copy">
-                <strong>Spotify</strong>{#if spotifyConnected}<small
-                        >{spotifyProfile?.display_name ||
+                <strong>Spotify</strong>
+                <small>
+                    {#if spotifyConnected}
+                        {spotifyProfile?.display_name ||
                             spotifyProfile?.id ||
-                            "Connected Spotify account"}</small
-                    >{/if}
+                            "Connected Spotify account"}
+                    {:else}
+                        Link your Spotify account directly; no setup is needed.
+                    {/if}
+                </small>
             </div>
             <button
                 class="outline-button compact-action"
@@ -48,27 +53,6 @@
                     : onConnectSpotify}
                 >{spotifyConnected ? "Disconnect" : "Connect"}</button
             >
-        </div>
-        <div class="settings-row spotify-client-id-row">
-            <div class="settings-row-copy">
-                <strong>Spotify Client ID</strong>
-                <small
-                    >Required for direct Spotify OAuth; no client secret is needed.
-                    Use a Spotify Developer app ID and register
-                    http://127.0.0.1:43821/callback as a Redirect URI.
-                    Web apps also need their exact app URL.</small
-                >
-            </div>
-            <input
-                class="room-server-input spotify-client-id-input"
-                type="text"
-                bind:value={spotifyClientId}
-                on:change={onSaveSpotifyClientId}
-                placeholder="Spotify Client ID"
-                aria-label="Spotify Client ID"
-                autocomplete="off"
-                maxlength="64"
-            />
         </div>
         <div class="settings-row">
             <div class="settings-row-copy">
@@ -92,15 +76,34 @@
         <div class="settings-row">
                 <div class="settings-row-copy">
                     <strong>Download Folder</strong><small
-                        >{downloadDirectoryName
-                            ? `${downloadDirectoryName} · played songs save here automatically`
-                            : "Choose a destination for played songs and downloads."}</small
+                        >{#if browserDownloadMode}
+                            Downloads use the browser's configured location. In
+                            Firefox, change it in Settings > General > Files and
+                            Applications. Use Wavelength Desktop to choose a
+                            custom folder.
+                        {:else if !browserFolderPickerSupported}
+                            Your browser controls the download location. In
+                            Firefox, change it in Settings > General > Files and
+                            Applications. Use Wavelength Desktop to choose a
+                            custom folder.
+                        {:else if downloadDirectoryName}
+                            {downloadDirectoryName} · played songs save here
+                            automatically
+                        {:else}
+                            Choose a destination for played songs and downloads.
+                        {/if}</small
                     >
                 </div>
                 <button
                     class="outline-button compact-action"
                     on:click={onChooseDownloadDirectory}
-                    >{downloadDirectoryName ? "Change" : "Choose"}</button
+                    >{browserDownloadMode
+                        ? "Browser default"
+                        : !browserFolderPickerSupported
+                          ? "Use browser location"
+                        : downloadDirectoryName
+                          ? "Change"
+                          : "Choose"}</button
                 >
             </div>
         <button
