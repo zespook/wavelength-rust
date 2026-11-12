@@ -6,6 +6,7 @@
     export let spotifyClientId = "";
     export let downloadDirectoryName = "";
     export let tauriAvailable = false;
+    export let appVersion = "Web app";
     export let appUpdateChecking = false;
     export let appUpdateStatus = "";
     export let qobuzConfigured = false;
@@ -52,8 +53,9 @@
             <div class="settings-row-copy">
                 <strong>Spotify Client ID</strong>
                 <small
-                    >Use a Spotify Developer app ID; no client secret is needed.
-                    Add http://127.0.0.1:43821/callback as a Redirect URI.
+                    >Required for direct Spotify OAuth; no client secret is needed.
+                    Use a Spotify Developer app ID and register
+                    http://127.0.0.1:43821/callback as a Redirect URI.
                     Web apps also need their exact app URL.</small
                 >
             </div>
@@ -78,19 +80,6 @@
                 class="outline-button compact-action"
                 on:click={onOpenQobuzCredentials}
                 >Set credentials</button
-            >
-        </div>
-        <div class="settings-row">
-            <div class="settings-row-copy">
-                <strong>Wavelength updates</strong><small
-                    >{appUpdateStatus || (tauriAvailable ? "Checks on launch and every six hours" : "Available in the desktop app")}</small
-                >
-            </div>
-            <button
-                class="outline-button compact-action"
-                disabled={!tauriAvailable || appUpdateChecking}
-                on:click={() => onCheckForAppUpdates()}
-                >{!tauriAvailable ? "Desktop app only" : appUpdateChecking ? "Checking" : "Check now"}</button
             >
         </div>
         <div class="settings-row">
@@ -185,6 +174,30 @@
                 class="outline-button compact-action"
                 on:click={() => onNavigate("/logs")}>View logs</button
             >
+        </div>
+    </section>
+    <section class="settings-section" aria-label="About">
+        <header class="settings-section-heading"><h2>About</h2></header>
+        <div class="settings-list">
+            <div class="settings-row">
+                <div class="settings-row-copy">
+                    <strong>Wavelength</strong>
+                    <small>{tauriAvailable ? `Version ${appVersion}` : "Web app"}</small>
+                </div>
+            </div>
+            <div class="settings-row">
+                <div class="settings-row-copy">
+                    <strong>Updates</strong><small
+                        >{appUpdateStatus || (tauriAvailable ? "Checks on launch and every six hours" : "Available in the desktop app")}</small
+                    >
+                </div>
+                <button
+                    class="outline-button compact-action"
+                    disabled={!tauriAvailable || appUpdateChecking}
+                    on:click={() => onCheckForAppUpdates()}
+                    >{!tauriAvailable ? "Desktop app only" : appUpdateChecking ? "Checking" : "Check now"}</button
+                >
+            </div>
         </div>
     </section>
 </section>

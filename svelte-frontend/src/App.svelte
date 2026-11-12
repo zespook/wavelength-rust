@@ -1,5 +1,6 @@
 <script>
   import { onMount, tick } from "svelte";
+  import { getVersion } from "@tauri-apps/api/app";
   import { invoke, isTauri } from "@tauri-apps/api/core";
   import { listen } from "@tauri-apps/api/event";
   import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -614,6 +615,7 @@
   let spotifyRefreshToken = "";
   let spotifyRefreshPromise = null;
   let pendingSpotifyOAuth = null;
+  let appVersion = isTauri() ? "Loading" : "Web app";
   let selectedCollectionId = "";
   let shuffleOn = false;
   let repeatMode = "off";
@@ -623,6 +625,7 @@
   let queue = previewMode
     ? previewQueue
     : JSON.parse(localStorage.getItem("wavelength-queue") || "[]");
+  let removedQueueHistory = [];
   let queueDownloadStatuses = previewMode ? previewQueueDownloadStatuses : {};
   let downloadCompletionMarks = {};
   let queueStatusRefreshInFlight = false;
@@ -2337,6 +2340,16 @@
   onMount(() => {
     let mounted = true;
     let unlistenSpotifyOAuth;
+    if (isTauri()) {
+      void getVersion()
+        .then((version) => {
+          if (mounted) appVersion = version;
+        })
+        .catch((error) => {
+          console.error("Could not read the app version.", error);
+          if (mounted) appVersion = "Unavailable";
+        });
+    }
     systemThemeMedia = window.matchMedia("(prefers-color-scheme: dark)");
     applyAppearance();
     applyUiScale();
@@ -2635,13 +2648,13 @@
         notice = error?.message || "Spotify could not be restored.";
       });
     } else if (spotifyConnected || spotifyResult === "connected") {
-      roomServerReady
-        .then(() => fetchSpotifyData(spotifyResult === "connected"))
-        .then((profile) => {
-          if (spotifyResult === "connected" && profile && pendingInviteCode) {
-            joinPartyAs(profile.display_name || profile.id, pendingInviteCode);
-          }
-        });
+      spotifyConnected = false;
+      spotifyProfile = null;
+      spotifyPlaylists = [];
+      spotifySavedTracks = [];
+      localStorage.removeItem("wavelength-spotify-connected");
+      if (spotifyResult === "connected")
+        notice = "Enter a Spotify Client ID in Settings to use Spotify OAuth.";
     }
     const overflowRoot = document.getElementById("app") || contentInner;
     const resizeObserver = new ResizeObserver(() => {
@@ -2703,31 +2716,28 @@
       ...(options.headers || {}),
     };
     const roomRequest = path.startsWith("/parties");
-    const spotifyRequest = path.startsWith("/spotify/");
     const localAudioRequest = isLocalPlayer() && path.startsWith("/audio/");
-    if (spotifyRequest && spotifyClientId)
+    if (path.startsWith("/spotify/")) {
+      if (!spotifyClientId.trim())
+        throw new Error(
+          "Enter a Spotify Client ID in Settings to use Spotify OAuth.",
+        );
       return spotifyApiForAppPath(path, options);
+    }
     if (roomRequest && !roomServerUrl)
       throw new Error(
         "Set a room server URL in Settings to use shared listening.",
       );
-    if (spotifyRequest && isTauri() && !spotifyClientId && !roomServerUrl)
-      throw new Error("Set a room server URL in Settings to use Spotify.");
     if (roomRequest && partyHostToken)
       headers.Authorization = `Bearer ${partyHostToken}`;
     let baseUrl = "/api";
-    if (roomRequest || (spotifyRequest && roomServerUrl))
-      baseUrl = `${roomServerUrl}/api`;
+    if (roomRequest) baseUrl = `${roomServerUrl}/api`;
     else if (localAudioRequest) baseUrl = await localAudioBase();
     const requestPath = localAudioRequest ? path.slice("/audio".length) : path;
     const response = await fetch(`${baseUrl}${requestPath}`, {
       ...options,
       headers,
-      credentials: roomRequest
-        ? "omit"
-        : spotifyRequest && roomServerUrl
-          ? "include"
-          : "same-origin",
+      credentials: roomRequest ? "omit" : "same-origin",
     });
     const data = await response.json().catch(() => ({}));
     if (roomRequest && response.status === 401 && partyHostToken) {
@@ -3605,86 +3615,62 @@
     if (pendingInviteCode)
       localStorage.setItem("wavelength-pending-invite", pendingInviteCode);
 
-    if (spotifyClientId) {
-      try {
-        if (!/^[A-Za-z0-9]{16,64}$/.test(spotifyClientId.trim()))
-          throw new Error("Enter a valid Spotify Client ID in Settings.");
-        const flow = await createSpotifyPkceFlow();
-        if (isTauri()) {
-          pendingSpotifyOAuth = flow;
-          await invoke("start_spotify_pkce_oauth", {
-            clientId: flow.clientId,
-            codeChallenge: flow.challenge,
-            state: flow.state,
-          });
-        } else {
-          sessionStorage.setItem(
-            "wavelength-spotify-oauth-client-id",
-            flow.clientId,
-          );
-          sessionStorage.setItem(
-            "wavelength-spotify-oauth-verifier",
-            flow.verifier,
-          );
-          sessionStorage.setItem("wavelength-spotify-oauth-state", flow.state);
-          sessionStorage.setItem(
-            "wavelength-spotify-oauth-redirect-uri",
-            flow.redirectUri,
-          );
-          const authorizeUrl = new URL("https://accounts.spotify.com/authorize");
-          authorizeUrl.search = new URLSearchParams({
-            response_type: "code",
-            client_id: flow.clientId,
-            redirect_uri: flow.redirectUri,
-            scope:
-              "user-read-private user-read-email user-library-read user-library-modify playlist-read-private playlist-read-collaborative playlist-modify-public playlist-modify-private",
-            code_challenge_method: "S256",
-            code_challenge: flow.challenge,
-            state: flow.state,
-          }).toString();
-          window.location.assign(authorizeUrl.toString());
-        }
-      } catch (error) {
-        pendingSpotifyOAuth = null;
-        notice = error?.message || "Spotify sign-in could not be opened.";
-      }
+    if (!spotifyClientId.trim()) {
+      notice = "Enter a Spotify Client ID in Settings to use Spotify OAuth.";
+      navigate("/settings");
       return;
     }
 
-    if (isTauri() && !roomServerUrl) {
-      notice =
-        "Enter a Spotify Client ID in Settings or configure a room server to connect Spotify.";
-      return;
+    try {
+      if (!/^[A-Za-z0-9]{16,64}$/.test(spotifyClientId.trim()))
+        throw new Error("Enter a valid Spotify Client ID in Settings.");
+      const flow = await createSpotifyPkceFlow();
+      if (isTauri()) {
+        pendingSpotifyOAuth = flow;
+        await invoke("start_spotify_pkce_oauth", {
+          clientId: flow.clientId,
+          codeChallenge: flow.challenge,
+          state: flow.state,
+        });
+      } else {
+        sessionStorage.setItem(
+          "wavelength-spotify-oauth-client-id",
+          flow.clientId,
+        );
+        sessionStorage.setItem(
+          "wavelength-spotify-oauth-verifier",
+          flow.verifier,
+        );
+        sessionStorage.setItem("wavelength-spotify-oauth-state", flow.state);
+        sessionStorage.setItem(
+          "wavelength-spotify-oauth-redirect-uri",
+          flow.redirectUri,
+        );
+        const authorizeUrl = new URL("https://accounts.spotify.com/authorize");
+        authorizeUrl.search = new URLSearchParams({
+          response_type: "code",
+          client_id: flow.clientId,
+          redirect_uri: flow.redirectUri,
+          scope:
+            "user-read-private user-read-email user-library-read user-library-modify playlist-read-private playlist-read-collaborative playlist-modify-public playlist-modify-private",
+          code_challenge_method: "S256",
+          code_challenge: flow.challenge,
+          state: flow.state,
+        }).toString();
+        window.location.assign(authorizeUrl.toString());
+      }
+    } catch (error) {
+      pendingSpotifyOAuth = null;
+      notice = error?.message || "Spotify sign-in could not be opened.";
     }
-    if (isTauri()) {
-      void invoke("start_spotify_oauth", { serverUrl: roomServerUrl }).catch(
-        (error) => {
-          notice = error?.message || "Spotify sign-in could not be opened.";
-        },
-      );
-      return;
-    }
-    const returnOrigin = encodeURIComponent(window.location.origin);
-    const apiBase = roomServerUrl ? `${roomServerUrl}/api` : "/api";
-    window.location.assign(
-      `${apiBase}/spotify/login?return_origin=${returnOrigin}`,
-    );
   }
 
   async function disconnectSpotify() {
     let logoutError = null;
-    if (spotifyClientId) {
-      try {
-        await persistSpotifyRefreshToken(null);
-      } catch (error) {
-        logoutError = error;
-      }
-    } else {
-      try {
-        await api("/spotify/logout", { method: "POST" });
-      } catch (error) {
-        logoutError = error;
-      }
+    try {
+      await persistSpotifyRefreshToken(null);
+    } catch (error) {
+      logoutError = error;
     }
     spotifyConnected = false;
     spotifyProfile = null;
@@ -4172,6 +4158,7 @@
   function clearQueue() {
     if (sendPartyCommand("clear-queue", {}, "canManageQueue")) return;
     queue = [];
+    removedQueueHistory = [];
     localStorage.setItem("wavelength-queue", "[]");
     schedulePartyStatePublish();
   }
@@ -4497,6 +4484,9 @@
   }
   async function addToQueue(track) {
     if (!track || queue.some((item) => item.id === track.id)) return;
+    removedQueueHistory = removedQueueHistory.filter(
+      (item) => item.id !== track.id,
+    );
     if (partyRole === "guest") {
       if (!isQueueDownloadable(track) && !track.serverAudioId) {
         notice = "This track is not available to share in the room.";
@@ -4538,6 +4528,18 @@
     queue = queue.filter((item) => item.id !== id);
     localStorage.setItem("wavelength-queue", JSON.stringify(queue));
     schedulePartyStatePublish();
+  }
+
+  function removePlayedFromQueue(track) {
+    if (!track || !queue.some((item) => item.id === track.id)) return false;
+    queue = queue.filter((item) => item.id !== track.id);
+    removedQueueHistory = [
+      ...removedQueueHistory.filter((item) => item.id !== track.id),
+      track,
+    ].slice(-50);
+    localStorage.setItem("wavelength-queue", JSON.stringify(queue));
+    schedulePartyStatePublish();
+    return true;
   }
   function handleQueueDragStart(event, index) {
     if (!guestCanManageQueue) return;
@@ -4933,6 +4935,19 @@
 
   function previousTrack() {
     if (sendPartyCommand("previous-track", {}, "canControlPlayback")) return;
+    const restoredTrack =
+      removedQueueHistory[removedQueueHistory.length - 1];
+    if (restoredTrack) {
+      removedQueueHistory = removedQueueHistory.slice(0, -1);
+      queue = [
+        restoredTrack,
+        ...queue.filter((item) => item.id !== restoredTrack.id),
+      ];
+      localStorage.setItem("wavelength-queue", JSON.stringify(queue));
+      schedulePartyStatePublish();
+      playTrack(restoredTrack);
+      return;
+    }
     const source = queueSource();
     if (!source.length) return;
     const currentIndex = source.findIndex((track) => track.id === playing?.id);
@@ -4947,7 +4962,10 @@
     const source = queueSource();
     if (!source.length) return;
     const target = resolveNextTrack(1);
-    if (target && target.id !== playing?.id) playTrack(target);
+    if (target && target.id !== playing?.id) {
+      removePlayedFromQueue(playing);
+      playTrack(target);
+    }
   }
 
   function handleAudioEnded() {
@@ -4980,8 +4998,7 @@
       schedulePartyStatePublish();
       return;
     }
-    if (playing && queue.some((item) => item.id === playing.id))
-      removeFromQueue(playing.id);
+    removePlayedFromQueue(playing);
     if (repeatMode === "all") nextTrack();
     else {
       isPlaying = false;
@@ -7259,6 +7276,7 @@
               bind:spotifyClientId
               {downloadDirectoryName}
               tauriAvailable={isTauri()}
+              {appVersion}
               {appUpdateChecking}
               {appUpdateStatus}
               qobuzConfigured={qobuzConfigured}

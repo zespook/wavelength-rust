@@ -199,6 +199,40 @@ struct LocalServices {
 	children: Mutex<Vec<Child>>,
 }
 
+fn stop_local_service(child: &mut Child) {
+	#[cfg(windows)]
+	{
+		use std::os::windows::process::CommandExt;
+
+		let pid = child.id().to_string();
+		let taskkill = env::var_os("SystemRoot")
+			.map(PathBuf::from)
+			.map(|root| root.join("System32").join("taskkill.exe"))
+			.unwrap_or_else(|| PathBuf::from("taskkill.exe"));
+		let result = Command::new(taskkill)
+			.args(["/PID", &pid, "/T", "/F"])
+			.creation_flags(0x08000000)
+			.stdin(Stdio::null())
+			.stdout(Stdio::null())
+			.stderr(Stdio::null())
+			.status();
+		if !matches!(&result, Ok(status) if status.success())
+			&& matches!(child.try_wait(), Ok(None))
+		{
+			eprintln!("Could not stop the local service process tree: {result:?}");
+		}
+	}
+
+	if let Err(error) = child.kill() {
+		if matches!(child.try_wait(), Ok(None)) {
+			eprintln!("Could not stop the local service process: {error}");
+		}
+	}
+	if let Err(error) = child.wait() {
+		eprintln!("Could not wait for the local service process to exit: {error}");
+	}
+}
+
 fn local_service_port(app: &AppHandle) -> Result<u16, String> {
 	if let Some(port) = app
 		.try_state::<LocalServices>()
@@ -673,10 +707,14 @@ fn main() {
 		.run(|app, event| {
 			if matches!(event, RunEvent::Exit) {
 				if let Some(services) = app.try_state::<LocalServices>() {
-					if let Ok(mut children) = services.children.lock() {
-						for child in children.iter_mut() {
-							let _ = child.kill();
-							let _ = child.wait();
+					match services.children.lock() {
+						Ok(mut children) => {
+							for child in children.iter_mut() {
+								stop_local_service(child);
+							}
+						}
+						Err(error) => {
+							eprintln!("Could not lock local services for shutdown: {error}");
 						}
 					}
 				}

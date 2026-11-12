@@ -61,7 +61,7 @@ Push a semantic version tag such as `v1.2.3` to build a desktop release. The rel
 
 ## Run the self-hosted server with Docker
 
-Dockerfiles and Compose manifests are intentionally not included. The following Bash instructions build the Rust room API using an inline Dockerfile and run it with MongoDB. From the repository root, copy `.env.example` to `.env`, then set `ROOM_SERVER_PASSCODE` to a unique value of at least 16 characters. Server-managed Spotify OAuth is optional; the Wavelength app can instead connect directly using the Client ID in Settings.
+Dockerfiles and Compose manifests are intentionally not included. The following Bash instructions build the Rust room API using an inline Dockerfile and run it with MongoDB. From the repository root, copy `.env.example` to `.env`, then set `ROOM_SERVER_PASSCODE` to a unique value of at least 16 characters. The Wavelength app uses direct Spotify OAuth with the Client ID configured in Settings; the room server is not involved in Spotify sign-in.
 
 Build the backend image:
 
