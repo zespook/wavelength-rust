@@ -24,7 +24,17 @@ from spotipy.cache_handler import CacheFileHandler
 from SpotiFLAC import AsyncSpotiFLAC
 import httpx
 from yt_dlp import YoutubeDL
-from playlist import format_track, load_album, load_playlist, load_public_album, load_public_playlist, load_public_track, spotify_album_id, spotify_playlist_id
+from playlist import (
+    _first_image_url,
+    format_track,
+    load_album,
+    load_playlist,
+    load_public_album,
+    load_public_playlist,
+    load_public_track,
+    spotify_album_id,
+    spotify_playlist_id,
+)
 
 load_dotenv()
 
@@ -280,8 +290,7 @@ def format_search_collection(collection, result_type):
     artist = ", ".join(item.get("name", "") for item in artists if isinstance(item, dict) and item.get("name"))
     if result_type == "playlist":
         artist = (collection.get("owner") or {}).get("display_name", "Spotify")
-    images = collection.get("images") or []
-    thumbnail = next((image.get("url") for image in images if isinstance(image, dict) and image.get("url")), None)
+    thumbnail = _first_image_url(collection.get("images"))
     return {
         "type": result_type,
         "videoId": collection.get("id"),
@@ -291,6 +300,38 @@ def format_search_collection(collection, result_type):
         "thumbnail": thumbnail,
         "trackCount": collection.get("tracks", {}).get("total", 0),
     }
+
+
+def _youtube_thumbnail(item):
+    video_id = item.get("id")
+    thumbnails = item.get("thumbnails")
+    candidates = [
+        (index, image)
+        for index, image in enumerate(thumbnails if isinstance(thumbnails, list) else [])
+        if isinstance(image, dict)
+        and isinstance(image.get("url"), str)
+        and image["url"].startswith(("https://", "http://"))
+    ]
+    thumbnail = item.get("thumbnail")
+    if isinstance(thumbnail, str) and thumbnail.startswith(("https://", "http://")):
+        candidates.append((
+            len(candidates),
+            {
+                "url": thumbnail,
+                "width": item.get("thumbnail_width"),
+                "height": item.get("thumbnail_height"),
+            },
+        ))
+    if candidates:
+        _, image = max(
+            candidates,
+            key=lambda candidate: (
+                (candidate[1].get("width") or 0) * (candidate[1].get("height") or 0),
+                candidate[0],
+            ),
+        )
+        return image["url"]
+    return f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg" if video_id else None
 
 
 def _spotify_client(client_id=None, client_secret=None, access_token=None):
@@ -425,11 +466,7 @@ async def search(
             for item in items:
                 if not item or not item.get("id"):
                     continue
-                thumbnails = item.get("thumbnails") or []
-                thumbnail = item.get("thumbnail") or next(
-                    (image.get("url") for image in reversed(thumbnails) if image.get("url")),
-                    f"https://i.ytimg.com/vi/{item['id']}/hqdefault.jpg",
-                )
+                thumbnail = _youtube_thumbnail(item)
                 duration = item.get("duration")
                 duration_string = item.get("duration_string")
                 if not duration_string and isinstance(duration, (int, float)):

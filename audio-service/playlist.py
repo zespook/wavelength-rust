@@ -22,11 +22,25 @@ def spotify_track_id(value: str):
 def _first_image_url(images):
     if not images:
         return None
-    if isinstance(images, list):
-        for item in images:
-            if isinstance(item, dict) and item.get("url"):
-                return item["url"]
-    return None
+    if not isinstance(images, list):
+        return None
+    candidates = [
+        (index, item)
+        for index, item in enumerate(images)
+        if isinstance(item, dict)
+        and isinstance(item.get("url"), str)
+        and item["url"].startswith(("https://", "http://"))
+    ]
+    if not candidates:
+        return None
+    _, image = max(
+        candidates,
+        key=lambda candidate: (
+            (candidate[1].get("width") or 0) * (candidate[1].get("height") or 0),
+            -candidate[0],
+        ),
+    )
+    return image["url"]
 
 
 def _spotify_entity_id(value, entity):
@@ -135,7 +149,7 @@ def format_track(track):
         "title": track.get("name") or "Unknown track",
         "artist": artist_name or "Unknown artist",
         "album": album.get("name", ""),
-        "thumbnail": album_images[0].get("url") if album_images and isinstance(album_images[0], dict) else None,
+        "thumbnail": _first_image_url(album_images),
         "duration": int(track.get("duration_ms") or 0) // 1000,
         "spotify_url": (track.get("external_urls") or {}).get("spotify") or (f"https://open.spotify.com/track/{track_id}" if track_id else None),
         "spotify_artist_url": f"https://open.spotify.com/artist/{first_artist_id}" if first_artist_id else None,
@@ -304,7 +318,7 @@ def load_playlist(spotify, playlist_id: str):
         "id": details["id"],
         "name": details["name"],
         "owner": details.get("owner", {}).get("display_name", "Spotify"),
-        "thumbnail": details["images"][0]["url"] if details.get("images") else None,
+        "thumbnail": _first_image_url(details.get("images")),
         "trackCount": len(formatted)
     }
 
@@ -325,7 +339,7 @@ def load_album(spotify, album_id: str):
         "id": details["id"],
         "name": details["name"],
         "owner": ", ".join(artist["name"] for artist in details.get("artists", [])),
-        "thumbnail": details["images"][0]["url"] if details.get("images") else None,
+        "thumbnail": _first_image_url(details.get("images")),
         "trackCount": len(formatted),
         "type": "album",
     }

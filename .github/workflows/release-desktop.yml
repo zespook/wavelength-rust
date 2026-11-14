@@ -34,7 +34,7 @@ jobs:
         with:
           node-version: 22
           cache: npm
-          cache-dependency-path: svelte-frontend/package-lock.json
+          cache-dependency-path: package-lock.json
 
       - uses: actions/setup-python@v5
         with:
@@ -42,12 +42,10 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      - name: Install frontend dependencies
-        working-directory: svelte-frontend
+      - name: Install project dependencies
         run: npm ci
 
       - name: Set app version from release tag
-        working-directory: svelte-frontend
         env:
           RELEASE_TAG: ${{ github.ref_name }}
         shell: bash
@@ -65,7 +63,6 @@ jobs:
           '
 
       - name: Configure signed update feed
-        working-directory: svelte-frontend
         env:
           GITHUB_REPOSITORY: ${{ github.repository }}
           TAURI_UPDATER_PUBLIC_KEY: ${{ vars.TAURI_UPDATER_PUBLIC_KEY }}
@@ -74,12 +71,10 @@ jobs:
 
       - name: Package local services (Windows)
         if: runner.os == 'Windows'
-        working-directory: svelte-frontend
         run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/package-services.ps1
 
       - name: Package local services (macOS)
         if: runner.os == 'macOS'
-        working-directory: svelte-frontend
         run: bash scripts/package-services-macos.sh
 
       - name: Build and publish signed release assets
@@ -89,7 +84,7 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
-          projectPath: svelte-frontend
+          projectPath: .
           tagName: ${{ github.ref_name }}
           releaseName: Wavelength ${{ github.ref_name }}
           releaseBody: See the release notes for changes and fixes.

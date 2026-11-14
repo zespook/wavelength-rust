@@ -1,9 +1,18 @@
 # Dependencies and build output
 node_modules/
 dist/
+dist-dioxus/
 target/
 .vite/
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+coverage/
+htmlcov/
+.coverage
+coverage.xml
+*.tsbuildinfo
 
 # Python
 __pycache__/
@@ -18,15 +27,16 @@ venv/
 
 # Runtime data and logs
 cache/
+downloads/
 .mongodb-data/
-qobuz-rest-api/downloads/
 *.log
 
 # Generated desktop service bundle
-svelte-frontend/src-tauri/resources/services/
+src-tauri/resources/services/
 
-# Packaged desktop installers and build outputs
-svelte-frontend/installer/
+# Retired frontend outputs and local design references
+svelte-frontend/
+design-references/
 
 # Unrelated local project archive
 /lcam.zip
@@ -35,6 +45,9 @@ svelte-frontend/installer/
 .DS_Store
 Thumbs.db
 *.tmp
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
 brio-settings/bin/
 brio-settings/obj/
 brio-settings/publish/
@@ -42,3 +55,5 @@ brio-settings-rust/target/
 
 .github/skills/
 .vscode/
+.design-references/
+.svelte-frontend/

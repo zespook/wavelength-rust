@@ -1,0 +1,625 @@
+:root {
+  --sidebar-width: clamp(200px, 18vw, 248px);
+  --player-height: clamp(80px, 4.375vw, 84px);
+  --rail-width: 320px;
+  --page-content-width: 1200px;
+  --page-frame-width: 1440px;
+}
+
+.app-shell.sidebar-collapsed .sidebar {
+  width: var(--sidebar-compact);
+  padding: var(--space-4) var(--space-2);
+}
+
+.app-shell.sidebar-collapsed .sidebar nav button {
+  justify-content: center;
+  gap: 0;
+  padding: 0;
+}
+
+.app-shell.sidebar-collapsed .sidebar nav button span {
+  display: none;
+}
+
+.app-shell:not(.queue-closed) {
+  --page-content-width: 1000px;
+  --page-frame-width: 1120px;
+  --page-gutter: clamp(20px, 2.5vw, 24px);
+}
+
+.player-bar {
+  grid-template-columns: minmax(0, 1.15fr) minmax(0, 1.3fr) minmax(156px, 1fr);
+  gap: clamp(8px, 1.04vw, 20px);
+  padding-inline: clamp(12px, 1.04vw, 20px);
+}
+
+.player-identity {
+  gap: clamp(16px, 5.55vw, 80px);
+}
+
+.vinyl-player {
+  flex: 0 1 auto;
+  max-width: calc(100% - 116px);
+}
+
+.player-track {
+  flex: 1 1 auto;
+}
+
+@media (max-width: 900px) {
+  .player-identity {
+    gap: 16px;
+  }
+
+  .vinyl-player {
+    max-width: calc(100% - 52px);
+  }
+}
+
+.home-download-folder-reminder button {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+.playlists-toolbar {
+  display: grid;
+  grid-template-columns: minmax(240px, 1fr) auto auto;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.playlists-toolbar .playlist-search {
+  min-width: 0;
+}
+
+.playlist-result-count {
+  color: var(--muted);
+  font-size: calc(12px * var(--font-size-scale, 1));
+  white-space: nowrap;
+}
+
+@media (min-width: 750px) and (max-width: 1184px) {
+  .playlists-toolbar {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .playlists-toolbar .playlist-search {
+    grid-column: 1 / -1;
+  }
+
+  .party-room-form-actions,
+  .party-room-end-action {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .party-room-form-actions > button,
+  .party-room-end-action > button {
+    min-width: 0;
+    padding-inline: var(--space-2);
+  }
+
+  .party-invite-section > .outline-button {
+    width: 100%;
+  }
+}
+
+@media (width < 948px) {
+  .content-inner.page-home {
+    gap: var(--space-8);
+  }
+
+}
+
+@container page-area (max-width: 800px) {
+  .content-inner.page-home .home-hero {
+    min-height: auto;
+  }
+}
+
+@container page-area (max-width: 680px) {
+  .content-inner.page-home .stats-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .content-inner.page-home .home-stats-heading {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .content-inner.page-home .home-stats-title {
+    flex: 1 1 180px;
+  }
+
+  .content-inner.page-home .home-stats-heading .stats-period-label {
+    flex: 0 1 170px;
+    min-width: 0;
+  }
+
+  .content-inner.page-home .home-recently-played .track-row {
+    grid-template-columns: minmax(0, 1fr) 68px 48px;
+  }
+
+  .content-inner.page-home .home-recently-played .track-select {
+    grid-column: 1 / 3;
+  }
+
+  .content-inner.page-home .home-recently-played .album-name {
+    display: none;
+  }
+
+  .content-inner.page-home .home-recently-played .track-actions {
+    grid-column: 3;
+  }
+}
+
+@container page-area (max-width: 420px) {
+  .content-inner.page-home .home-recently-played .track-row {
+    grid-template-columns: minmax(0, 1fr) 40px;
+    min-height: 60px;
+  }
+
+  .content-inner.page-home .home-recently-played .track-select {
+    grid-column: 1;
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .content-inner.page-home .home-recently-played .track-length {
+    display: none;
+  }
+
+  .content-inner.page-home .home-recently-played .track-actions {
+    grid-column: 2;
+  }
+}
+
+@media (width < 800px) {
+  .app-shell:not(.queue-closed) .playlist-detail-heading {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: start;
+    gap: 8px 12px;
+  }
+
+  .app-shell:not(.queue-closed) .playlist-detail-heading > .outline-button {
+    grid-column: 1 / -1;
+    justify-self: start;
+    white-space: nowrap;
+  }
+
+  .app-shell:not(.queue-closed) .playlist-detail-heading > h1 {
+    grid-row: 2;
+    grid-column: 1;
+  }
+
+  .app-shell:not(.queue-closed) .playlist-detail-heading > p {
+    grid-row: 3;
+    grid-column: 1;
+  }
+
+  .app-shell:not(.queue-closed) .playlist-detail-heading > .solid-button {
+    grid-row: 2 / 4;
+    grid-column: 2;
+    align-self: center;
+  }
+}
+
+@container page-area (max-width: 560px) {
+  .content-inner.page-settings .settings-dashboard {
+    column-count: 1;
+  }
+
+  .content-inner.page-settings .settings-card-wide {
+    column-span: none;
+  }
+
+  .content-inner.page-home .home-hero {
+    grid-template-columns: minmax(0, 1fr);
+    align-items: start;
+    gap: var(--space-6);
+  }
+
+  .content-inner.page-home .home-hero-copy {
+    align-content: start;
+    gap: var(--space-6);
+  }
+
+  .content-inner.page-home .home-library-preview {
+    grid-template-columns: 128px minmax(0, 1fr);
+    align-content: center;
+    align-items: center;
+    gap: var(--space-5);
+    min-height: 220px;
+    padding: var(--space-6);
+  }
+
+  .content-inner.page-home .home-preview-link {
+    grid-column: 1 / -1;
+  }
+}
+
+@container page-area (max-width: 400px) {
+  .content-inner.page-home .home-library-preview {
+    grid-template-columns: minmax(0, 1fr);
+    align-content: start;
+    min-height: 0;
+  }
+}
+
+@container page-area (max-width: 600px) {
+  .content-inner.page-activity .download-log-columns {
+    display: none;
+  }
+
+  .content-inner.page-activity .download-log-entry {
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: start;
+    gap: var(--space-2) var(--space-3);
+    padding-block: var(--space-2);
+  }
+
+  .content-inner.page-activity .download-log-entry > time {
+    grid-column: 1;
+    grid-row: 1;
+  }
+
+  .content-inner.page-activity .download-log-level {
+    grid-column: 2;
+    grid-row: 1;
+  }
+
+  .content-inner.page-activity .download-log-source {
+    grid-column: 1 / -1;
+    grid-row: 2;
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+
+  .content-inner.page-activity .download-log-message {
+    grid-column: 1 / -1;
+    grid-row: 3;
+  }
+
+  .content-inner.page-activity .download-log-entry progress {
+    grid-column: 1 / -1;
+    grid-row: 4;
+  }
+
+  .content-inner.page-equalizer .equalizer-page-heading {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 4px;
+  }
+
+  .content-inner.page-equalizer .equalizer-toolbar {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .content-inner.page-equalizer .equalizer-preset-section {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    align-items: stretch;
+    gap: 8px;
+    width: 100%;
+  }
+
+  .content-inner.page-equalizer .equalizer-preset-control,
+  .content-inner.page-equalizer .equalizer-save-form {
+    width: 100%;
+    min-width: 0;
+  }
+
+  .content-inner.page-equalizer .equalizer-save-form input {
+    min-width: 0;
+  }
+
+  .content-inner.page-equalizer .equalizer-toolbar-actions {
+    align-self: stretch;
+    width: 100%;
+    margin-left: 0;
+  }
+
+  .content-inner.page-equalizer .equalizer-toolbar-actions .compact-action {
+    width: 100%;
+  }
+
+  .content-inner.page-equalizer .equalizer-band-editor {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (min-width: 750px) and (max-width: 1128px) {
+  .equalizer-band-editor {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .equalizer-type-control,
+  .equalizer-band-editor-heading {
+    grid-column: 1 / -1;
+  }
+}
+
+@media (min-width: 750px) and (max-width: 1024px) {
+  .volume-control {
+    position: relative;
+    grid-template-columns: 36px;
+    gap: 0;
+  }
+
+  .volume-control .volume-slider {
+    position: absolute;
+    right: 0;
+    bottom: calc(100% + var(--space-6) + var(--space-2));
+    display: none;
+    width: 144px;
+    height: 36px;
+    padding: var(--space-2);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    background: var(--panel);
+    z-index: 50;
+  }
+
+  .volume-control:hover .volume-slider,
+  .volume-control:focus-within .volume-slider,
+  .volume-control.open .volume-slider {
+    display: block;
+  }
+}
+
+@media (width < 922px) {
+  .volume-control {
+    position: relative;
+    grid-template-columns: 36px;
+    gap: 0;
+  }
+
+  .volume-control .volume-slider {
+    position: absolute;
+    left: 50%;
+    right: auto;
+    bottom: 100%;
+    display: none;
+    box-sizing: border-box;
+    width: 40px;
+    min-width: 40px;
+    height: 144px;
+    padding: 0;
+    transform: translateX(-50%);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    background: var(--panel);
+    writing-mode: vertical-lr;
+    direction: rtl;
+    touch-action: none;
+    z-index: 50;
+  }
+
+  .player-bar .volume-slider::-webkit-slider-runnable-track {
+    width: 4px;
+    height: 100%;
+    background: linear-gradient(to top, var(--lime) 0%, var(--lime) var(--volume, 0%), var(--panel-hi) var(--volume, 0%), var(--panel-hi) 100%);
+  }
+
+  .player-bar .volume-slider::-moz-range-track {
+    width: 4px;
+    height: 100%;
+    background: linear-gradient(to top, var(--lime) 0%, var(--lime) var(--volume, 0%), var(--panel-hi) var(--volume, 0%), var(--panel-hi) 100%);
+  }
+
+  .player-bar .volume-slider::-webkit-slider-thumb {
+    margin-top: 0;
+    margin-left: -3px;
+  }
+
+  .player-bar .volume-slider::-moz-range-thumb {
+    margin-left: -3px;
+  }
+
+  .volume-control:hover .volume-slider,
+  .volume-control:focus-within .volume-slider,
+  .volume-control.open .volume-slider {
+    display: block;
+  }
+}
+
+@media (max-width: 800px) and (max-height: 700px) {
+  .content-inner.page-equalizer {
+    padding: 12px 12px 16px;
+  }
+
+  .content-inner.page-equalizer .equalizer-page {
+    gap: 8px;
+  }
+
+  .content-inner.page-equalizer .equalizer-page-heading h1 {
+    font-size: calc(22px * var(--font-size-scale, 1));
+  }
+
+  .content-inner.page-equalizer .equalizer-page-heading p {
+    font-size: calc(11px * var(--font-size-scale, 1));
+    line-height: 1.3;
+  }
+
+  .content-inner.page-equalizer .equalizer-workbench {
+    gap: 8px;
+  }
+
+  .content-inner.page-equalizer .equalizer-toolbar {
+    gap: 8px;
+    padding: 8px;
+  }
+
+  .content-inner.page-equalizer .equalizer-preset-section {
+    align-items: stretch;
+    gap: 8px;
+  }
+
+  .content-inner.page-equalizer .equalizer-preset-control {
+    display: flex;
+    flex: 1 1 100%;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+  }
+
+  .content-inner.page-equalizer .equalizer-preset-control .select-menu-trigger {
+    flex: 1;
+    min-width: 0;
+    min-height: 36px;
+    padding-inline: 8px;
+  }
+
+  .content-inner.page-equalizer .equalizer-save-form {
+    flex: 1 1 100%;
+    gap: 6px;
+    width: 100%;
+  }
+
+  .content-inner.page-equalizer .equalizer-save-form input {
+    min-width: 0;
+    min-height: 36px;
+    padding-inline: 8px;
+  }
+
+  .content-inner.page-equalizer .equalizer-save-form .compact-action,
+  .content-inner.page-equalizer .equalizer-toolbar-actions .compact-action {
+    min-height: 36px;
+    padding-inline: 8px;
+  }
+
+  .content-inner.page-equalizer .equalizer-spectrum-canvas {
+    height: clamp(128px, 20vw, 160px);
+  }
+
+  .content-inner.page-equalizer .equalizer-graph-hint {
+    padding: 6px 8px;
+    font-size: calc(11px * var(--font-size-scale, 1));
+  }
+
+  .content-inner.page-equalizer .equalizer-band-strip {
+    gap: 6px;
+  }
+
+  .content-inner.page-equalizer .equalizer-band-tab {
+    flex-basis: 68px;
+    min-height: 52px;
+    padding: 6px;
+  }
+
+  .content-inner.page-equalizer .equalizer-band-editor {
+    gap: 10px;
+    padding: 10px;
+  }
+}
+
+@media (max-width: 947px) {
+  .app-shell {
+    --page-gutter: clamp(16px, 2.5vw, 24px);
+  }
+}
+
+@media (max-width: 700px) {
+  .app-shell:not(.queue-closed) {
+    --rail-width: 230px;
+  }
+
+  .app-shell:not(.queue-closed) .right-rail,
+  .app-shell:not(.queue-closed) .details-rail {
+    min-width: 230px;
+  }
+
+  .topbar {
+    grid-template-columns: 160px minmax(0, 1fr) 36px;
+    gap: 8px;
+    padding-inline: 12px;
+  }
+
+  .topbar-end {
+    justify-content: flex-end;
+  }
+
+  .download-log-columns {
+    display: none;
+  }
+
+  .download-log-entry {
+    grid-template-columns: max-content max-content minmax(0, 1fr);
+    align-items: start;
+    gap: 4px 8px;
+    min-height: 0;
+    padding: 8px 0;
+  }
+
+  .download-log-entry > time {
+    grid-column: 1;
+  }
+
+  .download-log-level {
+    grid-column: 2;
+  }
+
+  .download-log-source {
+    grid-column: 3;
+  }
+
+  .download-log-message,
+  .download-log-entry progress {
+    grid-column: 1 / -1;
+  }
+
+  .notification-log-entry {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 4px;
+    padding-block: 8px;
+  }
+
+  .equalizer-band-editor {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .equalizer-band-editor-heading {
+    grid-column: 1 / -1;
+  }
+
+  .app-shell:not(.queue-closed) .equalizer-band-editor {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .app-shell:not(.queue-closed) .equalizer-page-heading {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 4px;
+  }
+
+  .app-shell:not(.queue-closed) .equalizer-toolbar {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .app-shell:not(.queue-closed) .equalizer-preset-section {
+    display: grid;
+    width: 100%;
+  }
+
+  .app-shell:not(.queue-closed) .equalizer-preset-control,
+  .app-shell:not(.queue-closed) .equalizer-save-form {
+    width: 100%;
+    min-width: 0;
+  }
+
+  .app-shell:not(.queue-closed) .equalizer-toolbar-actions {
+    align-self: stretch;
+    width: 100%;
+  }
+
+  .app-shell:not(.queue-closed) .equalizer-toolbar-actions .compact-action {
+    width: 100%;
+  }
+
+  .app-shell:not(.queue-closed) .playlists-toolbar {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

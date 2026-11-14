@@ -1,26 +1,22 @@
-# Rust + Svelte migration
+# Dioxus application
 
-The production stack now uses `svelte-frontend` for the application shell and `rust-backend` as the public backend entry point.
+The Dioxus frontend is the only supported Wavelength client. The Tauri desktop host loads the same Dioxus web build and adds native window controls, local service management, folder selection, downloads, and updater support.
 
-## Current boundary
+## Project layout
 
-- `rust-backend` owns the public port, MongoDB party APIs, Spotify OAuth/library APIs, request validation, audio proxying, lyrics lookup, and upstream failure handling.
-- Local files are mounted read-only at `/music` and exposed through `/api/library`; set `MUSIC_LIBRARY_PATH` to the host folder in `.env`.
-- Users can also choose a local folder directly in a supported browser; those files stay in the browser and can be played or downloaded without server mounting.
-- Search combines the browser-selected/server library with Spotify track, album, and playlist results. SpotiFLAC uses Qobuz, Tidal, Amazon, and Deezer as download fallbacks; those providers are not independent metadata search indexes.
-- Admin accounts are stored in MongoDB and managed through `/api/admin/users`; each account carries a `canDownload` permission.
-- `audio-service`, `qobuz-api`, and MongoDB are unchanged.
-- The Svelte UI uses a Sonara-inspired library-first layout while keeping party creation/joining visible beside solo playback.
+- `dioxus-frontend/` contains the Rust/Dioxus UI and its static assets.
+- `src-tauri/` contains the Tauri desktop host, configuration, icons, and native integrations.
+- `audio-service/` and `qobuz-rest-api/` provide local search, playback, and download services.
+- `rust-backend/` provides the optional self-hosted room API.
 
-The old Express service and React client have been removed. Encrypted Qobuz credential storage, the Svelte client's live party event protocol, and enforcement of download permissions on a dedicated authenticated download endpoint still need to be completed. The current browser download action works for local files and streamed track results when the user has access to the audio service.
+## Development
 
-## Local development
+Install Node.js, Rust, Python, Dioxus CLI 0.7.10, and the platform prerequisites. From the repository root, install the Tauri CLI dependency with `npm install`. On Windows, `npm run dev` starts Dioxus and the local audio services at `http://127.0.0.1:8080`; `npm run desktop:dev` launches the same UI in Tauri.
 
-```powershell
-Push-Location svelte-frontend
-npm install
-npm run dev
-Pop-Location
-```
+Build the Dioxus web assets with `npm run build:dioxus`. Build a Windows installer with `npm run desktop:build`, or use `npm run desktop:build:unix` on macOS and Linux.
 
-The Rust room API requires MongoDB. See the Docker server setup in `README.md`; for local runs, set `MONGODB_URI` to the MongoDB address.
+The room API is optional. Shared listening requires the Rust backend and MongoDB; see the Docker setup in [README.md](./README.md).
+
+## Platform notes
+
+The web and desktop clients share the same layout; there is no separate mobile-optimized client. Spotify sign-in, room synchronization, and shared playback require the relevant Spotify app configuration and/or a running room server for end-to-end testing.

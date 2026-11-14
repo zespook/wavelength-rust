@@ -1,0 +1,12 @@
+[application]
+name = "wavelength"
+default_platform = "web"
+out_dir = "../dist-dioxus"
+asset_dir = "public"
+
+[web.app]
+title = "Wavelength"
+
+[web.watcher]
+index_on_404 = true
+watch_path = ["src", "public"]

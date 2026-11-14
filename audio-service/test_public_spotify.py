@@ -66,12 +66,22 @@ class PublicSpotifyPayloadTests(unittest.TestCase):
             "id": "track123",
             "name": "Numb",
             "artists": [{"name": "Linkin Park"}],
-            "album": {"name": "Meteora", "images": []},
+            "album": {
+                "name": "Meteora",
+                "images": [
+                    {"url": "", "width": 640, "height": 640},
+                    {"url": "https://cdn.example/large.png", "width": 640, "height": 640},
+                    {"url": "https://cdn.example/small.png", "width": 64, "height": 64},
+                ],
+            },
             "duration_ms": 185000,
             "external_urls": {"spotify": "https://open.spotify.com/track/track123"},
         }
 
-        self.assertEqual(format_track(track)["album"], "Meteora")
+        formatted = format_track(track)
+
+        self.assertEqual(formatted["album"], "Meteora")
+        self.assertEqual(formatted["thumbnail"], "https://cdn.example/large.png")
 
     def test_format_track_includes_spotify_artist_and_album_urls(self):
         track = {

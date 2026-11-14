@@ -91,7 +91,17 @@ class SearchUrlTests(unittest.IsolatedAsyncioTestCase):
 
             def extract_info(self, target, download=False):
                 calls.append((target, download))
-                return {"id": "abcDEF_1234", "title": "Video title", "channel": "Channel", "duration": 120}
+                return {
+                    "id": "abcDEF_1234",
+                    "title": "Video title",
+                    "channel": "Channel",
+                    "duration": 120,
+                    "thumbnail": "https://img.example/medium.jpg",
+                    "thumbnails": [
+                        {"url": "https://img.example/small.jpg", "width": 120, "height": 90},
+                        {"url": "https://img.example/large.jpg", "width": 1280, "height": 720},
+                    ],
+                }
 
         with patch.object(main, "YoutubeDL", FakeYoutubeDL):
             result = await main.search(q="https://youtu.be/abcDEF_1234", source="youtube")
@@ -101,6 +111,35 @@ class SearchUrlTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["results"][0]["videoId"], "abcDEF_1234")
         self.assertEqual(result["results"][0]["length"], "2:00")
         self.assertEqual(result["results"][0]["source"], "youtube")
+        self.assertEqual(result["results"][0]["thumbnail"], "https://img.example/large.jpg")
+
+    async def test_youtube_search_uses_video_thumbnail_fallback(self):
+        class FakeYoutubeDL:
+            def __init__(self, _options):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return None
+
+            def extract_info(self, _target, download=False):
+                return {
+                    "entries": [{
+                        "id": "abcDEF_1234",
+                        "title": "Video title",
+                        "thumbnails": [{"url": "invalid-url"}],
+                    }]
+                }
+
+        with patch.object(main, "YoutubeDL", FakeYoutubeDL):
+            result = await main.search(q="video", source="youtube")
+
+        self.assertEqual(
+            result["results"][0]["thumbnail"],
+            "https://i.ytimg.com/vi/abcDEF_1234/hqdefault.jpg",
+        )
 
     def test_youtube_audio_download_uses_default_player_clients(self):
         options_seen = []

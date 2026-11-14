@@ -4,7 +4,9 @@ A local music player with Spotify and YouTube search, a bundled audio service, a
 
 ## Project layout
 
-- `svelte-frontend/` — Svelte web app and Tauri desktop client.
+- `dioxus-frontend/` — Dioxus web and desktop UI.
+- `src-tauri/` — Tauri desktop host and native integrations.
+- `scripts/` — Dioxus, Tauri, and local-service build/run tools.
 - `audio-service/` — local audio search, preparation, and streaming service.
 - `rust-backend/` — self-hosted room API and backend.
 - `qobuz-rest-api/` — Qobuz service used by the local audio service; clone the repository with its submodules.
@@ -14,18 +16,18 @@ A local music player with Spotify and YouTube search, a bundled audio service, a
 - Git
 - Node.js and npm
 - Python 3
-- Rust stable and the Windows C++ build tools for Tauri development/builds
+- Rust stable and the platform prerequisites for Tauri development/builds
+- Dioxus CLI (`cargo install dioxus-cli --version 0.7.10`)
 - Docker Engine with BuildKit to run the self-hosted server
 
 ## Run the app locally on Windows
 
-Clone the repository with its Qobuz submodule, then install the frontend dependencies:
+Clone the repository with its Qobuz submodule, then install the project dependencies:
 
 ```powershell
 git clone --recurse-submodules https://github.com/zespook/wavelength.git
 Set-Location wavelength
 Copy-Item .env.example .env
-Set-Location svelte-frontend
 npm install
 ```
 
@@ -35,9 +37,9 @@ Start the web app and its local Qobuz/audio services:
 npm run dev
 ```
 
-The app is available at `http://127.0.0.1:5173`. The launcher starts the local Qobuz API on port `8000` and audio service on port `8787`; it installs service Python dependencies into a virtual environment when needed. Spotify account search works after direct Spotify sign-in. The audio service's separate catalog search uses Spotify client credentials in the repository `.env`; those credentials are not needed to link an account. YouTube search does not require Spotify credentials.
+The Dioxus web app is available at `http://127.0.0.1:8080`. The launcher starts the local Qobuz API on port `8000` and audio service on port `8787`; it installs service Python dependencies into a virtual environment when needed. Spotify account search works after direct Spotify sign-in. The audio service's separate catalog search uses Spotify client credentials in the repository `.env`; those credentials are not needed to link an account. YouTube search does not require Spotify credentials.
 
-To run the desktop app instead, from `svelte-frontend` run:
+To run the native desktop app:
 
 ```powershell
 npm run desktop:dev
@@ -49,11 +51,13 @@ To build the Windows installer:
 npm run desktop:build
 ```
 
-The installer is written to `svelte-frontend/src-tauri/target/release/bundle/nsis/`. See [DESKTOP.md](./DESKTOP.md) for additional desktop and deployment details.
+The installer is written to `src-tauri/target/release/bundle/nsis/`. See [DESKTOP.md](./DESKTOP.md) for additional desktop and deployment details.
+
+On macOS or Linux, run `npm run desktop:build:unix` to package the local services for the host OS and build its desktop bundle.
 
 ## Connect Spotify directly
 
-Spotify can be connected without the self-hosted room server or per-user setup. Wavelength includes its public Spotify Client ID and uses PKCE; no client secret is needed or included. The Spotify app owner must register the exact Redirect URIs used by the app: `http://127.0.0.1:43821/callback` for desktop, `http://127.0.0.1:5173/settings` for Vite development, and `http://127.0.0.1:4173/settings` for Vite preview. A web deployment must also register its exact `/settings` URL. Sign-in opens Spotify in the system browser, and account data is loaded directly from Spotify.
+Spotify can be connected without the self-hosted room server or per-user setup. Wavelength includes its public Spotify Client ID and uses PKCE; no client secret is needed or included. The Spotify app owner must register the exact Redirect URIs used by the app: `http://127.0.0.1:43821/callback` for desktop and `http://127.0.0.1:8080/settings` for Dioxus development. A web deployment must also register its exact `/settings` URL. Sign-in opens Spotify in the system browser, and account data is loaded directly from Spotify.
 
 ## Release versions
 

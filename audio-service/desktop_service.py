@@ -34,12 +34,17 @@ def load_service_module(name, source_path):
 
 def configure_background_chromium():
     from pydoll.browser.chromium import Chrome
+    from SpotiFLAC.core import solver
     from SpotiFLAC.core import signed_session_mono
-    from SpotiFLAC.core.solver import build_chromium_options
+    build_chromium_options = solver.build_chromium_options
 
     def hidden_options(**_kwargs):
-        return build_chromium_options(hidden=True)
+        options, profile_dir = build_chromium_options(hidden=True)
+        if os.getenv("TS_DEBUG_VISIBLE", "").strip() != "1":
+            options.add_argument("--start-minimized")
+        return options, profile_dir
 
+    solver.build_chromium_options = hidden_options
     signed_session_mono.build_chromium_options = hidden_options
     original_start = Chrome.start
 
@@ -74,6 +79,9 @@ def hide_browser_taskbar_window(process_id):
     get_window_long_ptr.restype = ctypes.c_ssize_t
     set_window_long_ptr.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_ssize_t]
     set_window_long_ptr.restype = ctypes.c_ssize_t
+    show_window = user32.ShowWindow
+    show_window.argtypes = [wintypes.HWND, ctypes.c_int]
+    show_window.restype = wintypes.BOOL
     set_window_pos = user32.SetWindowPos
     set_window_pos.argtypes = [
         wintypes.HWND,
@@ -119,6 +127,8 @@ def hide_browser_taskbar_window(process_id):
                     0,
                     swp_nosize | swp_nomove | swp_nozorder | swp_noactivate | swp_framechanged,
                 )
+            if os.getenv("TS_DEBUG_VISIBLE", "").strip() != "1":
+                show_window(hwnd, 6)
             found = True
             return True
 

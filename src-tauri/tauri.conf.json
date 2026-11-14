@@ -1,0 +1,52 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Wavelength",
+  "version": "0.1.6",
+  "identifier": "com.wavelength.player",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://127.0.0.1:8080/",
+    "beforeBuildCommand": "npm run build:dioxus",
+    "frontendDist": "../dist-dioxus"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "label": "player",
+        "title": "Wavelength",
+        "url": "index.html",
+        "width": 1280,
+        "height": 800,
+        "decorations": false,
+        "shadow": false,
+        "minWidth": 750,
+        "minHeight": 600
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; script-src 'self' 'wasm-unsafe-eval'; img-src 'self' data: blob: https:; font-src 'self' https://fonts.gstatic.com data:; media-src 'self' blob: data: http://localhost:* http://127.0.0.1:* http://[::1]:* https:; connect-src 'self' ipc: http://ipc.localhost http://localhost:* http://127.0.0.1:* http://[::1]:* https://lrclib.net https:"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "resources": {
+      "resources/services": "services"
+    },
+    "windows": {
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper"
+      }
+    },
+    "createUpdaterArtifacts": true
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IENCQjlGOUREREZBMTczMzEKUldReGM2SGYzZm01eTk2cndiL2ZpSzJsVlN1bURXbjlaOU01cGUzUEo4VEhEYUtVQkxNRjNvMDEK",
+      "endpoints": [
+        "https://github.com/zespook/wavelength/releases/latest/download/latest.json"
+      ]
+    }
+  }
+}

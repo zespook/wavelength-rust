@@ -3,7 +3,8 @@ $ErrorActionPreference = 'Stop'
 $Root = Split-Path $PSScriptRoot -Parent
 $QobuzDir = Join-Path $Root 'qobuz-rest-api'
 $AudioDir = Join-Path $Root 'audio-service'
-$FrontendDir = Join-Path $Root 'svelte-frontend'
+$DioxusFrontendDir = Join-Path $Root 'dioxus-frontend'
+$DevPort = 8080
 $Python = (Get-Command python.exe -ErrorAction Stop).Source
 $StartedServiceIds = @()
 $rootEnvPath = Join-Path $Root '.env'
@@ -91,14 +92,15 @@ try {
   throw
 }
 
-if (Test-TcpPort 5173) {
-  Write-Host 'Vite is already listening at http://127.0.0.1:5173/' -ForegroundColor Green
+if (Test-TcpPort $DevPort) {
+  Write-Host "Dioxus is already listening at http://127.0.0.1:$DevPort/" -ForegroundColor Green
   return
 }
 
-Push-Location $FrontendDir
+Push-Location $DioxusFrontendDir
 try {
-  node .\node_modules\vite\bin\vite.js --host=0.0.0.0 --port=5173 --strictPort
+  $Dx = (Get-Command dx.exe -ErrorAction Stop).Source
+  & $Dx serve --platform web --addr 127.0.0.1 --port $DevPort --open false
 } finally {
   Pop-Location
   foreach ($processId in $StartedServiceIds) {
