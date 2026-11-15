@@ -1,17 +1,14 @@
 {
   "name": "wavelength",
-  "version": "0.1.6",
+  "version": "0.1.9",
   "private": true,
   "type": "module",
   "scripts": {
     "dev": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\\start-local.ps1",
     "dev:dioxus": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\\start-local.ps1",
     "build:dioxus": "node scripts/build-dioxus.mjs",
-    "desktop:dev": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\\run-tauri.ps1 dev",
-    "desktop:build": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\\run-tauri.ps1 build",
-    "desktop:build:unix": "bash scripts/package-services-macos.sh && tauri build"
-  },
-  "devDependencies": {
-    "@tauri-apps/cli": "^2.8.4"
+    "desktop:dev": "node scripts/run-dioxus.mjs dev",
+    "desktop:build": "node scripts/run-dioxus.mjs build",
+    "desktop:build:unix": "node scripts/run-dioxus.mjs build"
   }
 }

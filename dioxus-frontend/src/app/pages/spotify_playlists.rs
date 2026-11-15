@@ -80,7 +80,7 @@ pub(super) fn SpotifyPlaylistsPage(data: std::rc::Rc<PageData>) -> Element {
                             let selected = (app_state.spotify_playlist_selected)();
                             if let Some(source) = selected {
                                 let local = Playlist {
-                                    id: format!("playlist-{}", js_sys::Date::now() as u64),
+                                    id: format!("playlist-{}", crate::now_epoch_millis()),
                                     name: source.name.clone(),
                                     tracks: (app_state.spotify_playlist_tracks)(),
                                 };

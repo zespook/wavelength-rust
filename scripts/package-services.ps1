@@ -3,7 +3,8 @@ $ErrorActionPreference = 'Stop'
 $RootDir = Split-Path $PSScriptRoot -Parent
 $AudioDir = Join-Path $RootDir 'audio-service'
 $QobuzDir = Join-Path $RootDir 'qobuz-rest-api'
-$ResourceDir = Join-Path $RootDir 'src-tauri\resources\services'
+$ResourceDir = Join-Path $RootDir 'dioxus-frontend\resources\services'
+$BundleResourceDir = Join-Path $RootDir 'dioxus-frontend\resources'
 $BuildRoot = Join-Path $env:TEMP 'wavelength-desktop-service-build'
 $BuildVenv = Join-Path $env:TEMP 'wavelength-service-build-venv'
 $VenvPython = Join-Path $BuildVenv 'Scripts\python.exe'
@@ -69,4 +70,6 @@ if (-not (Test-Path (Join-Path $RuntimeResourceDir 'node.exe'))) {
     throw 'The bundled Node.js runtime is missing.'
 }
 
-Write-Host 'Combined audio/Qobuz service and compact runtimes are ready for Tauri bundling.' -ForegroundColor Green
+Compress-Archive -Path (Join-Path $ResourceDir '*') -DestinationPath (Join-Path $BundleResourceDir 'services.zip') -Force
+
+Write-Host 'Combined audio/Qobuz service and Node.js runtime are ready for Dioxus bundling.' -ForegroundColor Green

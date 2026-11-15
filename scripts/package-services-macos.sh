@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd -- "$(dirname -- "$0")/.." && pwd)"
 AUDIO_DIR="$ROOT_DIR/audio-service"
 QOBUZ_DIR="$ROOT_DIR/qobuz-rest-api"
-RESOURCE_DIR="$ROOT_DIR/src-tauri/resources/services"
+RESOURCE_DIR="$ROOT_DIR/dioxus-frontend/resources/services"
 BUILD_ROOT="${RUNNER_TEMP:-${TMPDIR:-/tmp}}/wavelength-desktop-service-build"
 BUILD_VENV="${RUNNER_TEMP:-${TMPDIR:-/tmp}}/wavelength-service-build-venv"
 VENV_PYTHON="$BUILD_VENV/bin/python"
@@ -64,4 +64,6 @@ if [[ ! -x "$API_RESOURCE_DIR/WavelengthLocalService" || ! -x "$RUNTIME_RESOURCE
 	exit 1
 fi
 
-echo "Combined local audio/Qobuz service and Node.js runtime are ready for Tauri bundling."
+tar -czf "$ROOT_DIR/dioxus-frontend/resources/services.tar.gz" -C "$RESOURCE_DIR" .
+
+echo "Combined local audio/Qobuz service and Node.js runtime are ready for Dioxus bundling."

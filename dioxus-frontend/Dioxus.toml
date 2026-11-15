@@ -10,3 +10,16 @@ title = "Wavelength"
 [web.watcher]
 index_on_404 = true
 watch_path = ["src", "public"]
+
+[bundle]
+identifier = "com.wavelength.desktop"
+publisher = "Wavelength"
+category = "Music"
+short_description = "A desktop music player with shared listening"
+icon = ["icons/icon.png", "icons/icon.ico", "icons/icon.icns"]
+
+[bundle.windows]
+resources = ["resources/services.zip"]
+
+[bundle.macos]
+resources = ["resources/services.tar.gz"]

@@ -94,7 +94,14 @@ pub(super) fn SettingsPage(data: std::rc::Rc<PageData>) -> Element {
                                     button { class: "outline-button compact-action", onclick: move |_| {
                                         spawn(async move {
                                             match browser::connect_spotify().await {
-                                                Ok(()) => app_state.notice.set(String::new()),
+                                                Ok(()) => match browser::restore_spotify().await {
+                                                    Ok(Some(restore)) => {
+                                                        app_state.spotify_profile.set(Some(restore.profile));
+                                                        app_state.notice.set("Spotify connected.".to_string());
+                                                    }
+                                                    Ok(None) => app_state.notice.set("Spotify sign-in completed, but the profile could not be restored.".to_string()),
+                                                    Err(error) => app_state.notice.set(error),
+                                                },
                                                 Err(error) => app_state.notice.set(error),
                                             }
                                         });
@@ -339,9 +346,51 @@ pub(super) fn SettingsPage(data: std::rc::Rc<PageData>) -> Element {
                         div { class: "settings-row",
                             div { class: "settings-row-copy",
                                 strong { "Updates" }
-                                small { "Available in the desktop app." }
+                                small {
+                                    if (app_state.window_controls_available)() {
+                                        "Check for and install signed desktop updates."
+                                    } else {
+                                        "Automatic updates are available in the desktop app."
+                                    }
+                                }
                             }
-                            button { class: "outline-button compact-action", disabled: true, "Desktop app only" }
+                            button {
+                                class: "outline-button compact-action",
+                                disabled: !(app_state.window_controls_available)()
+                                    || (app_state.update_checking)()
+                                    || (app_state.update_installing)(),
+                                onclick: move |_| {
+                                    if !(app_state.window_controls_available)() {
+                                        return;
+                                    }
+                                    app_state.update_checking.set(true);
+                                    app_state.update_dismissed_version.set(None);
+                                    let mut available = app_state.update_available;
+                                    let mut checking = app_state.update_checking;
+                                    let mut notice = app_state.notice;
+                                    spawn(async move {
+                                        match browser::check_for_updates().await {
+                                            Ok(Some(update)) => {
+                                                available.set(Some(update));
+                                                notice.set(String::new());
+                                            }
+                                            Ok(None) => {
+                                                available.set(None);
+                                                notice.set("Wavelength is up to date.".to_string());
+                                            }
+                                            Err(error) => notice.set(format!("Update check failed: {error}")),
+                                        }
+                                        checking.set(false);
+                                    });
+                                },
+                                if (app_state.update_checking)() {
+                                    "Checking…"
+                                } else if (app_state.window_controls_available)() {
+                                    "Check now"
+                                } else {
+                                    "Desktop app only"
+                                }
+                            }
                         }
                     }
                 }

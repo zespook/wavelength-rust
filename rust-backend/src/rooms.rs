@@ -547,8 +547,12 @@ fn frontend_origin(candidate: Option<&str>) -> String {
         if let Ok(url) = reqwest::Url::parse(value) {
             let origin = url.origin().ascii_serialization();
             let local = url.scheme() == "http" && matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "[::1]"));
-            let tauri = url.scheme() == "tauri" && url.host_str() == Some("localhost");
-            if origin == configured_origin || local || tauri { return origin; }
+            let dioxus = (url.scheme() == "http" && url.host_str() == Some("dioxus.index.html"))
+                || (url.scheme() == "dioxus" && url.host_str() == Some("index.html"));
+            if dioxus && url.scheme() == "dioxus" {
+                return "dioxus://index.html".into();
+            }
+            if origin == configured_origin || local || dioxus { return origin; }
         }
     }
     configured_origin
@@ -663,7 +667,7 @@ async fn spotify_callback(State(state): State<AppState>, headers: HeaderMap, Que
         response.headers_mut().append(SET_COOKIE, HeaderValue::from_static("wavelength_spotify_oauth=; Path=/api/spotify; Max-Age=0; HttpOnly; SameSite=Lax"));
         return response;
     }
-    let cross_origin = oauth_state.return_origin.starts_with("tauri://");
+    let cross_origin = oauth_state.return_origin == "dioxus://index.html";
     let secure = if oauth_state.return_origin.starts_with("https://") || cross_origin { "; Secure" } else { "" };
     let same_site = if cross_origin { "None" } else { "Lax" };
     let cookie = format!("wavelength_spotify={session_id}; Path=/; Max-Age=2592000; HttpOnly; SameSite={same_site}{secure}");
@@ -1621,8 +1625,8 @@ async fn main() {
         }
     });
     let mut origins = vec![
-        HeaderValue::from_static("http://tauri.localhost"),
-        HeaderValue::from_static("tauri://localhost"),
+        HeaderValue::from_static("http://dioxus.index.html"),
+        HeaderValue::from_static("dioxus://index.html"),
         HeaderValue::from_static("http://localhost:5173"),
         HeaderValue::from_static("http://127.0.0.1:5173"),
     ];
@@ -1689,7 +1693,7 @@ async fn main() {
 #[cfg(test)]
 mod tests {
     use super::{
-        is_shared_audio_stream_path, normalize_code, parse_audio_id, parse_byte_range,
+        frontend_origin, is_shared_audio_stream_path, normalize_code, parse_audio_id, parse_byte_range,
         public_api_request, room_command_allowed, room_update_document, room_update_filter,
         client_ip, hash_room_server_passcode, shared_audio_grant_matches, spotify_track_uris,
         token_hash, token_matches, too_many_requests, valid_room_code, verify_room_server_passcode,
@@ -1698,6 +1702,22 @@ mod tests {
     };
     use axum::http::{HeaderMap, HeaderValue, Method};
     use std::{collections::HashSet, net::{IpAddr, SocketAddr}};
+
+    #[test]
+    fn dioxus_desktop_webview_origins_are_allowed() {
+        assert_eq!(
+            frontend_origin(Some("http://dioxus.index.html")),
+            "http://dioxus.index.html"
+        );
+        assert_eq!(
+            frontend_origin(Some("dioxus://index.html")),
+            "dioxus://index.html"
+        );
+        assert_ne!(
+            frontend_origin(Some("http://dioxus.evil")),
+            "http://dioxus.evil"
+        );
+    }
 
     #[test]
     fn shared_audio_ids_and_ranges_are_validated() {

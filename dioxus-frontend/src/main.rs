@@ -2,14 +2,74 @@ mod app;
 mod browser;
 pub(crate) mod components;
 
+#[cfg(feature = "desktop")]
+mod desktop;
+
 #[cfg(test)]
 mod tests;
 
 use dioxus::prelude::*;
 use serde::{Deserialize, Serialize};
+#[cfg(target_arch = "wasm32")]
 use wasm_bindgen::JsValue;
 
 const AUDIO_SERVICE: &str = "http://127.0.0.1:8787";
+
+fn now_epoch_millis() -> i64 {
+    chrono::Utc::now().timestamp_millis()
+}
+
+fn random_unit_f64() -> f64 {
+    rand::random()
+}
+
+fn encode_uri_component(value: &str) -> String {
+    #[cfg(target_arch = "wasm32")]
+    {
+        js_sys::encode_uri_component(value)
+            .as_string()
+            .unwrap_or_else(|| value.to_string())
+    }
+    #[cfg(all(not(target_arch = "wasm32"), feature = "desktop"))]
+    {
+        url::form_urlencoded::byte_serialize(value.as_bytes())
+            .collect::<String>()
+            .replace('+', "%20")
+    }
+    #[cfg(all(not(target_arch = "wasm32"), not(feature = "desktop")))]
+    {
+        value.to_string()
+    }
+}
+
+async fn sleep_ms(milliseconds: u64) {
+    #[cfg(target_arch = "wasm32")]
+    gloo_timers::future::TimeoutFuture::new(milliseconds.min(u32::MAX as u64) as u32).await;
+    #[cfg(all(not(target_arch = "wasm32"), feature = "desktop"))]
+    tokio::time::sleep(std::time::Duration::from_millis(milliseconds)).await;
+    #[cfg(all(not(target_arch = "wasm32"), not(feature = "desktop")))]
+    std::thread::sleep(std::time::Duration::from_millis(milliseconds));
+}
+
+fn timestamp_millis(value: &serde_json::Value) -> Option<f64> {
+    value
+        .as_i64()
+        .map(|milliseconds| milliseconds as f64)
+        .or_else(|| value.as_f64())
+        .or_else(|| {
+            value
+                .as_str()
+                .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+                .map(|date| date.timestamp_millis() as f64)
+        })
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+pub(crate) struct UpdateInfo {
+    version: String,
+    notes: Option<String>,
+}
+
 const HOME_DEMO_RECENT: [(&str, &str, &str); 4] = [
     ("Sample Track 01", "Demo Artist A", "2 min ago"),
     ("Sample Track 02", "Demo Artist B", "31 min ago"),
@@ -662,6 +722,12 @@ struct LyricLine {
     text: String,
 }
 
+#[cfg(feature = "desktop")]
+fn main() {
+    desktop::run(app::App);
+}
+
+#[cfg(all(not(feature = "desktop"), feature = "web"))]
 fn main() {
     dioxus::launch(app::App);
 }
@@ -1366,12 +1432,12 @@ fn create_spotify_playlist(
     });
 }
 
-fn send_guest_room_command(
+async fn send_guest_room_command(
     action: &str,
     details: &serde_json::Value,
     mut notice: Signal<String>,
 ) -> bool {
-    match browser::emit_room_command(action, details) {
+    match browser::emit_room_command(action, details).await {
         Ok(status) if status == "sent" => {
             notice.set("Playback request sent to the room host.".to_string());
             true
@@ -1411,14 +1477,18 @@ fn play_track(
     history: Signal<Vec<Track>>,
     notice: Signal<String>,
 ) {
-    if send_guest_room_command(
-        "play-track",
-        &serde_json::json!({"track":room_track_json(&track)}),
-        notice,
-    ) {
-        return;
-    }
-    play_track_direct(track, current, audio_src, playing, queue, history, notice);
+    spawn(async move {
+        if send_guest_room_command(
+            "play-track",
+            &serde_json::json!({"track":room_track_json(&track)}),
+            notice,
+        )
+        .await
+        {
+            return;
+        }
+        play_track_direct(track, current, audio_src, playing, queue, history, notice);
+    });
 }
 
 fn play_track_direct(
@@ -1442,12 +1512,12 @@ fn play_track_direct(
         } else if is_local {
             browser::local_url(&track_id).await
         } else {
-            Ok(format!(
-                "{AUDIO_SERVICE}/stream/{}?code=solo&scope=permanent",
-                js_sys::encode_uri_component(&track_id)
-                    .as_string()
-                    .unwrap_or(track_id)
-            ))
+            browser::audio_service_base().map(|base| {
+                format!(
+                    "{base}/stream/{}?code=solo&scope=permanent",
+                    encode_uri_component(&track_id)
+                )
+            })
         };
         match source {
             Ok(url) => {
@@ -1476,65 +1546,71 @@ fn play_track_direct(
 }
 
 fn add_to_queue(track: Track, mut queue: Signal<Vec<Track>>, mut notice: Signal<String>) {
-    match browser::emit_room_command(
-        "add-track",
-        &serde_json::json!({"track":room_track_json(&track)}),
-    ) {
-        Ok(status) if status == "sent" => {
-            notice.set("Track request sent to the room host.".to_string());
-            return;
+    spawn(async move {
+        match browser::emit_room_command(
+            "add-track",
+            &serde_json::json!({"track":room_track_json(&track)}),
+        )
+        .await
+        {
+            Ok(status) if status == "sent" => {
+                notice.set("Track request sent to the room host.".to_string());
+                return;
+            }
+            Ok(status) if status == "unavailable" => {
+                notice.set("The room connection is not ready. Try again shortly.".to_string());
+                return;
+            }
+            Ok(status) if status == "permission-denied" => {
+                notice.set(room_permission_notice("add-track").to_string());
+                return;
+            }
+            Ok(_) => {}
+            Err(error) => {
+                notice.set(error);
+                return;
+            }
         }
-        Ok(status) if status == "unavailable" => {
-            notice.set("The room connection is not ready. Try again shortly.".to_string());
-            return;
+        let mut items = queue();
+        items.push(track);
+        queue.set(items.clone());
+        match browser::save("wavelength-queue", &items) {
+            Ok(()) => notice.set("Added to queue.".to_string()),
+            Err(error) => notice.set(error),
         }
-        Ok(status) if status == "permission-denied" => {
-            notice.set(room_permission_notice("add-track").to_string());
-            return;
-        }
-        Ok(_) => {}
-        Err(error) => {
-            notice.set(error);
-            return;
-        }
-    }
-    let mut items = queue();
-    items.push(track);
-    queue.set(items.clone());
-    match browser::save("wavelength-queue", &items) {
-        Ok(()) => notice.set("Added to queue.".to_string()),
-        Err(error) => notice.set(error),
-    }
+    });
 }
 
 fn remove_queue_item(index: usize, mut queue: Signal<Vec<Track>>, mut notice: Signal<String>) {
-    let mut items = queue();
-    if index >= items.len() {
-        return;
-    }
-    let track = items[index].clone();
-    match browser::emit_room_command("remove-track", &serde_json::json!({"trackId":track.key()})) {
-        Ok(status) if status == "sent" => {
-            notice.set("Queue change sent to the room host.".to_string());
+    spawn(async move {
+        let mut items = queue();
+        if index >= items.len() {
             return;
         }
-        Ok(status) if status == "unavailable" => {
-            notice.set("The room connection is not ready. Try again shortly.".to_string());
-            return;
+        let track = items[index].clone();
+        match browser::emit_room_command("remove-track", &serde_json::json!({"trackId":track.key()})).await {
+            Ok(status) if status == "sent" => {
+                notice.set("Queue change sent to the room host.".to_string());
+                return;
+            }
+            Ok(status) if status == "unavailable" => {
+                notice.set("The room connection is not ready. Try again shortly.".to_string());
+                return;
+            }
+            Ok(status) if status == "permission-denied" => {
+                notice.set(room_permission_notice("remove-track").to_string());
+                return;
+            }
+            Ok(_) => {}
+            Err(error) => {
+                notice.set(error);
+                return;
+            }
         }
-        Ok(status) if status == "permission-denied" => {
-            notice.set(room_permission_notice("remove-track").to_string());
-            return;
-        }
-        Ok(_) => {}
-        Err(error) => {
-            notice.set(error);
-            return;
-        }
-    }
-    items.remove(index);
-    queue.set(items.clone());
-    save_saved("wavelength-queue", &items, notice);
+        items.remove(index);
+        queue.set(items.clone());
+        save_saved("wavelength-queue", &items, notice);
+    });
 }
 
 fn move_queue_item(
@@ -1543,61 +1619,67 @@ fn move_queue_item(
     mut queue: Signal<Vec<Track>>,
     mut notice: Signal<String>,
 ) {
-    let items = queue();
-    if source_index >= items.len() || target_index >= items.len() || source_index == target_index {
-        return;
-    }
-    let track_id = items[source_index].key().to_string();
-    match browser::emit_room_command(
-        "reorder-queue",
-        &serde_json::json!({"trackId":track_id, "targetIndex":target_index}),
-    ) {
-        Ok(status) if status == "sent" => {
-            notice.set("Queue order request sent to the room host.".to_string());
+    spawn(async move {
+        let items = queue();
+        if source_index >= items.len() || target_index >= items.len() || source_index == target_index {
             return;
         }
-        Ok(status) if status == "unavailable" => {
-            notice.set("The room connection is not ready. Try again shortly.".to_string());
-            return;
+        let track_id = items[source_index].key().to_string();
+        match browser::emit_room_command(
+            "reorder-queue",
+            &serde_json::json!({"trackId":track_id, "targetIndex":target_index}),
+        )
+        .await
+        {
+            Ok(status) if status == "sent" => {
+                notice.set("Queue order request sent to the room host.".to_string());
+                return;
+            }
+            Ok(status) if status == "unavailable" => {
+                notice.set("The room connection is not ready. Try again shortly.".to_string());
+                return;
+            }
+            Ok(status) if status == "permission-denied" => {
+                notice.set(room_permission_notice("reorder-queue").to_string());
+                return;
+            }
+            Ok(_) => {}
+            Err(error) => {
+                notice.set(error);
+                return;
+            }
         }
-        Ok(status) if status == "permission-denied" => {
-            notice.set(room_permission_notice("reorder-queue").to_string());
-            return;
+        if let Some(items) = reordered_queue(items, source_index, target_index) {
+            queue.set(items.clone());
+            save_saved("wavelength-queue", &items, notice);
         }
-        Ok(_) => {}
-        Err(error) => {
-            notice.set(error);
-            return;
-        }
-    }
-    if let Some(items) = reordered_queue(items, source_index, target_index) {
-        queue.set(items.clone());
-        save_saved("wavelength-queue", &items, notice);
-    }
+    });
 }
 
 fn clear_queue(mut queue: Signal<Vec<Track>>, mut notice: Signal<String>) {
-    match browser::emit_room_command("clear-queue", &serde_json::json!({})) {
-        Ok(status) if status == "sent" => {
-            notice.set("Queue change sent to the room host.".to_string());
-            return;
+    spawn(async move {
+        match browser::emit_room_command("clear-queue", &serde_json::json!({})).await {
+            Ok(status) if status == "sent" => {
+                notice.set("Queue change sent to the room host.".to_string());
+                return;
+            }
+            Ok(status) if status == "unavailable" => {
+                notice.set("The room connection is not ready. Try again shortly.".to_string());
+                return;
+            }
+            Ok(status) if status == "permission-denied" => {
+                notice.set(room_permission_notice("clear-queue").to_string());
+                return;
+            }
+            Ok(_) => {}
+            Err(error) => {
+                notice.set(error);
+                return;
+            }
         }
-        Ok(status) if status == "unavailable" => {
-            notice.set("The room connection is not ready. Try again shortly.".to_string());
-            return;
-        }
-        Ok(status) if status == "permission-denied" => {
-            notice.set(room_permission_notice("clear-queue").to_string());
-            return;
-        }
-        Ok(_) => {}
-        Err(error) => {
-            notice.set(error);
-            return;
-        }
-    }
-    queue.set(Vec::new());
-    save_saved("wavelength-queue", &Vec::<Track>::new(), notice);
+        queue.set(Vec::new());
+        save_saved("wavelength-queue", &Vec::<Track>::new(), notice);
+    });
 }
 
 fn toggle_favorite(track: Track, mut favorites: Signal<Vec<Track>>, mut notice: Signal<String>) {
@@ -1614,34 +1696,40 @@ fn toggle_favorite(track: Track, mut favorites: Signal<Vec<Track>>, mut notice: 
 }
 
 fn toggle_playback(mut playing: Signal<bool>, mut notice: Signal<String>) {
-    if send_guest_room_command("toggle-playback", &serde_json::json!({}), notice) {
-        return;
-    }
-    if playing() {
-        if let Err(error) = browser::pause() {
+    spawn(async move {
+        if send_guest_room_command("toggle-playback", &serde_json::json!({}), notice).await {
+            return;
+        }
+        if playing() {
+            if let Err(error) = browser::pause() {
+                notice.set(error);
+            } else {
+                playing.set(false);
+            }
+        } else if let Err(error) = browser::play() {
             notice.set(error);
         } else {
-            playing.set(false);
+            playing.set(true);
         }
-    } else if let Err(error) = browser::play() {
-        notice.set(error);
-    } else {
-        playing.set(true);
-    }
+    });
 }
 
 fn toggle_shuffle(mut shuffle: Signal<bool>, notice: Signal<String>) {
-    if send_guest_room_command("toggle-shuffle", &serde_json::json!({}), notice) {
-        return;
-    }
-    shuffle.set(!shuffle());
+    spawn(async move {
+        if send_guest_room_command("toggle-shuffle", &serde_json::json!({}), notice).await {
+            return;
+        }
+        shuffle.set(!shuffle());
+    });
 }
 
 fn toggle_repeat(mut repeat_mode: Signal<String>, notice: Signal<String>) {
-    if send_guest_room_command("toggle-repeat", &serde_json::json!({}), notice) {
-        return;
-    }
-    repeat_mode.set(next_repeat_mode(&repeat_mode()).to_string());
+    spawn(async move {
+        if send_guest_room_command("toggle-repeat", &serde_json::json!({}), notice).await {
+            return;
+        }
+        repeat_mode.set(next_repeat_mode(&repeat_mode()).to_string());
+    });
 }
 
 fn next_repeat_mode(mode: &str) -> &'static str {
@@ -1697,15 +1785,19 @@ fn toggle_volume(volume: Signal<f64>, previous_volume: Signal<f64>, notice: Sign
 }
 
 fn seek_track(position: f64, mut playhead: Signal<f64>, notice: Signal<String>) {
-    if send_guest_room_command(
-        "seek",
-        &serde_json::json!({"currentTime":position.max(0.0)}),
-        notice,
-    ) {
-        return;
-    }
-    playhead.set(position.max(0.0));
-    browser::seek(position.max(0.0));
+    spawn(async move {
+        if send_guest_room_command(
+            "seek",
+            &serde_json::json!({"currentTime":position.max(0.0)}),
+            notice,
+        )
+        .await
+        {
+            return;
+        }
+        playhead.set(position.max(0.0));
+        browser::seek(position.max(0.0));
+    });
 }
 
 fn next_track(
@@ -1719,43 +1811,44 @@ fn next_track(
     repeat_mode: Signal<String>,
     mut notice: Signal<String>,
 ) {
-    if send_guest_room_command("next-track", &serde_json::json!({}), notice) {
-        return;
-    }
-    let mut items = queue();
-    if items.is_empty() {
-        let active = current();
-        let target = select_track_from_source(
-            &source,
-            active.as_ref(),
-            1,
-            shuffle(),
-            js_sys::Math::random(),
-        )
-        .or_else(|| (repeat_mode() == "all").then(|| active.clone()).flatten());
-        if let Some(track) = target.filter(|track| {
-            repeat_mode() == "all"
-                || active
-                    .as_ref()
-                    .is_none_or(|active| active.key() != track.key())
-        }) {
-            play_track_direct(track, current, audio_src, playing, queue, history, notice);
+    spawn(async move {
+        if send_guest_room_command("next-track", &serde_json::json!({}), notice).await {
+            return;
         }
-        return;
-    }
-    let next_index = if shuffle() {
-        (js_sys::Math::random() * items.len() as f64) as usize
-    } else {
-        0
-    };
-    let track = items.remove(next_index.min(items.len() - 1));
-    queue.set(items.clone());
-    if let Err(error) = browser::save("wavelength-queue", &items) {
-        notice.set(error);
-        return;
-    }
-    play_track_direct(track, current, audio_src, playing, queue, history, notice);
-    return;
+        let mut items = queue();
+        if items.is_empty() {
+            let active = current();
+            let target = select_track_from_source(
+                &source,
+                active.as_ref(),
+                1,
+                shuffle(),
+                random_unit_f64(),
+            )
+            .or_else(|| (repeat_mode() == "all").then(|| active.clone()).flatten());
+            if let Some(track) = target.filter(|track| {
+                repeat_mode() == "all"
+                    || active
+                        .as_ref()
+                        .is_none_or(|active| active.key() != track.key())
+            }) {
+                play_track_direct(track, current, audio_src, playing, queue, history, notice);
+            }
+            return;
+        }
+        let next_index = if shuffle() {
+            (random_unit_f64() * items.len() as f64) as usize
+        } else {
+            0
+        };
+        let track = items.remove(next_index.min(items.len() - 1));
+        queue.set(items.clone());
+        if let Err(error) = browser::save("wavelength-queue", &items) {
+            notice.set(error);
+            return;
+        }
+        play_track_direct(track, current, audio_src, playing, queue, history, notice);
+    });
 }
 
 fn select_track_from_source(
@@ -1849,14 +1942,16 @@ fn previous_track(
     source: Vec<Track>,
     notice: Signal<String>,
 ) {
-    if send_guest_room_command("previous-track", &serde_json::json!({}), notice) {
-        return;
-    }
-    if let Some(track) = select_track_from_source(&source, current().as_ref(), -1, false, 0.0)
-        .or_else(|| history().get(1).cloned())
-    {
-        play_track(track, current, audio_src, playing, queue, history, notice);
-    }
+    spawn(async move {
+        if send_guest_room_command("previous-track", &serde_json::json!({}), notice).await {
+            return;
+        }
+        if let Some(track) = select_track_from_source(&source, current().as_ref(), -1, false, 0.0)
+            .or_else(|| history().get(1).cloned())
+        {
+            play_track(track, current, audio_src, playing, queue, history, notice);
+        }
+    });
 }
 
 fn download_track(track: Track, mut notice: Signal<String>) {
@@ -1940,7 +2035,7 @@ fn copy_room_invite(
                 } else {
                     "Room code copied.".to_string()
                 });
-                gloo_timers::future::TimeoutFuture::new(1800).await;
+                sleep_ms(1800).await;
                 feedback.set(String::new());
             }
             Err(error) => notice.set(error),
@@ -2654,7 +2749,7 @@ async fn room_sync_loop(
     let mut last_progress_sent = 0.0;
     let mut last_host_sync_attempt = 0.0;
     loop {
-        gloo_timers::future::TimeoutFuture::new(150).await;
+        sleep_ms(150).await;
         let code = active_room_code();
         if code.is_empty() {
             last_error.clear();
@@ -2667,11 +2762,11 @@ async fn room_sync_loop(
         let role = room_role();
         let host_token = room_host_token();
         let name = room_name();
-        let now = js_sys::Date::now();
+        let now = now_epoch_millis() as f64;
         let mut force_rest_sync = false;
         let mut pending_playback_control = None;
 
-        match browser::drain_room_events() {
+        match browser::drain_room_events().await {
             Ok(events) => {
                 for event in events {
                     if event.event == "connect" {
@@ -2820,7 +2915,7 @@ async fn room_sync_loop(
                         "sentAtEpochMs": now as i64,
                     });
                     if track_id == last_playback_track {
-                        match browser::emit_room_playback_control(&control) {
+                        match browser::emit_room_playback_control(&control).await {
                             Ok(status) if status == "sent" => {
                                 last_playback_state = playing();
                                 last_progress_sent = now;
@@ -2849,7 +2944,7 @@ async fn room_sync_loop(
                         "currentTime": playhead().max(0.0),
                         "duration": media_duration().max(0.0),
                     });
-                    match browser::emit_room_playback_progress(&progress) {
+                    match browser::emit_room_playback_progress(&progress).await {
                         Ok(status) if status == "sent" || status == "unavailable" => {
                             last_progress_sent = now;
                         }
@@ -2927,7 +3022,7 @@ async fn room_sync_loop(
                     room_shared_playlists.set(party.playlists);
                     last_error.clear();
                     if let Some((track_id, is_playing, control)) = pending_playback_control {
-                        match browser::emit_room_playback_control(&control) {
+                        match browser::emit_room_playback_control(&control).await {
                             Ok(status) if status == "sent" => {
                                 last_playback_track = track_id;
                                 last_playback_state = is_playing;
@@ -3053,7 +3148,7 @@ async fn room_sync_loop(
                 let target_time = if party.is_playing {
                     party
                         .start_epoch
-                        .map(|start| ((js_sys::Date::now() as i64 - start).max(0)) as f64 / 1000.0)
+                        .map(|start| ((now_epoch_millis() - start).max(0)) as f64 / 1000.0)
                         .unwrap_or(party.paused_at.max(0.0))
                 } else {
                     party.paused_at.max(0.0)
@@ -3256,17 +3351,14 @@ fn apply_host_room_command(
 }
 
 fn format_activity_time(timestamp: &serde_json::Value) -> String {
-    let milliseconds = timestamp
-        .as_i64()
-        .map(|value| value as f64)
-        .or_else(|| timestamp.as_str().map(js_sys::Date::parse))
-        .filter(|value| value.is_finite());
-    let Some(milliseconds) = milliseconds else {
+    use chrono::TimeZone;
+    let Some(milliseconds) = timestamp_millis(timestamp).filter(|value| value.is_finite()) else {
         return "—".to_string();
     };
-    js_sys::Date::new(&JsValue::from_f64(milliseconds))
-        .to_locale_time_string("en-US")
-        .as_string()
+    chrono::Local
+        .timestamp_millis_opt(milliseconds as i64)
+        .single()
+        .map(|date| date.format("%I:%M:%S %p").to_string())
         .unwrap_or_else(|| "—".to_string())
 }
 
@@ -3291,7 +3383,7 @@ fn record_play_event(
         } else {
             track.artist
         },
-        played_at: serde_json::json!(js_sys::Date::now()),
+        played_at: serde_json::json!(now_epoch_millis()),
     });
     if events.len() > 5_000 {
         events.drain(..events.len() - 5_000);
@@ -3326,10 +3418,7 @@ fn home_statistics(
         }
     } else {
         for event in events.iter().filter(|event| {
-            event
-                .played_at
-                .as_f64()
-                .or_else(|| event.played_at.as_str().map(js_sys::Date::parse))
+            timestamp_millis(&event.played_at)
                 .is_some_and(|played_at| played_at >= cutoff)
         }) {
             let artist = if event.artist.trim().is_empty() {
@@ -3377,9 +3466,10 @@ fn stats_cutoff(period: &str) -> f64 {
     if period == "all" {
         return 0.0;
     }
-    let now = js_sys::Date::new_0();
+    use chrono::Datelike;
+    let now = chrono::Local::now();
     if period == "week" {
-        return now.get_time() - 7.0 * 24.0 * 60.0 * 60.0 * 1000.0;
+        return (now.timestamp_millis() - 7 * 24 * 60 * 60 * 1000) as f64;
     }
     let months = match period {
         "month" => 1,
@@ -3388,18 +3478,22 @@ fn stats_cutoff(period: &str) -> f64 {
         "year" => 12,
         _ => return 0.0,
     };
-    let day = now.get_date();
-    let cutoff = js_sys::Date::new_0();
-    cutoff.set_date(1);
-    cutoff.set_month(cutoff.get_month() - months);
-    let last_day = js_sys::Date::new_with_year_month_day(
-        cutoff.get_full_year(),
-        (cutoff.get_month() + 1) as i32,
-        0,
-    )
-    .get_date();
-    cutoff.set_date(day.min(last_day));
-    cutoff.get_time()
+    let day = now.day();
+    let first_of_month = now.with_day(1).unwrap_or(now);
+    let cutoff = first_of_month
+        .checked_sub_months(chrono::Months::new(months))
+        .unwrap_or(first_of_month);
+    let first_of_next_month = cutoff
+        .checked_add_months(chrono::Months::new(1))
+        .unwrap_or(cutoff);
+    let last_day = first_of_next_month
+        .checked_sub_days(chrono::Days::new(1))
+        .unwrap_or(cutoff)
+        .day();
+    cutoff
+        .with_day(day.min(last_day))
+        .unwrap_or(cutoff)
+        .timestamp_millis() as f64
 }
 
 fn save_qobuz_credentials(
@@ -3557,6 +3651,7 @@ fn load_activity(
     });
 }
 
+#[cfg(target_arch = "wasm32")]
 fn format_error(value: JsValue) -> String {
     value
         .as_string()

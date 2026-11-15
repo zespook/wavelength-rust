@@ -1,7 +1,6 @@
 name: Release Wavelength Desktop
 
 on:
-  workflow_dispatch:
   push:
     tags:
       - "v*"
@@ -10,17 +9,19 @@ permissions:
   contents: write
 
 jobs:
-  release:
+  build:
     strategy:
       fail-fast: false
-      max-parallel: 1
       matrix:
         include:
-          - platform: windows-latest
-            bundle: nsis
-          - platform: macos-latest
-            bundle: dmg
-    runs-on: ${{ matrix.platform }}
+          - runner: windows-latest
+            platform: windows-x86_64
+            bundle-types: nsis
+          - runner: macos-13
+            platform: darwin-x86_64
+          - runner: macos-latest
+            platform: darwin-aarch64
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -42,37 +43,27 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      - name: Install Dioxus CLI and WebAssembly target
-        run: |
-          rustup target add wasm32-unknown-unknown
-          cargo install dioxus-cli --version 0.7.10 --locked
+      - name: Install Dioxus CLI
+        run: cargo install dioxus-cli --version 0.7.10 --locked
 
-      - name: Install project dependencies
-        run: npm ci
-
-      - name: Set app version from release tag
+      - name: Verify release tag matches app version
         env:
           RELEASE_TAG: ${{ github.ref_name }}
-        shell: bash
+        shell: pwsh
         run: |
-          node -e '
-            const fs = require("node:fs");
-            const tag = process.env.RELEASE_TAG;
-            const match = /^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.exec(tag);
-            if (!match) throw new Error(`Invalid release tag: ${tag}. Expected vMAJOR.MINOR.PATCH.`);
-            const configPath = "src-tauri/tauri.conf.json";
-            const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
-            config.version = tag.slice(1);
-            fs.writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`);
-            console.log(`Building Wavelength ${config.version}`);
-          '
-
-      - name: Configure signed update feed
-        env:
-          GITHUB_REPOSITORY: ${{ github.repository }}
-          TAURI_UPDATER_PUBLIC_KEY: ${{ vars.TAURI_UPDATER_PUBLIC_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-        run: node scripts/configure-updater.mjs
+          if ($env:RELEASE_TAG -notmatch '^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$') {
+            throw 'Expected a vMAJOR.MINOR.PATCH release tag.'
+          }
+          $cargo = Get-Content dioxus-frontend/Cargo.toml -Raw
+          if ($cargo -match '(?m)^version\s*=\s*"([^"]+)"') {
+            $appVersion = $Matches[1]
+          } else {
+            throw 'Could not read the app version from dioxus-frontend/Cargo.toml.'
+          }
+          if ($appVersion -ne $env:RELEASE_TAG.Substring(1)) {
+            throw 'Release tag version does not match dioxus-frontend/Cargo.toml.'
+          }
+          Write-Host "Building Wavelength $appVersion"
 
       - name: Package local services (Windows)
         if: runner.os == 'Windows'
@@ -82,18 +73,99 @@ jobs:
         if: runner.os == 'macOS'
         run: bash scripts/package-services-macos.sh
 
-      - name: Build and publish signed release assets
-        uses: tauri-apps/tauri-action@v1
+      - name: Build desktop bundle (Windows)
+        if: runner.os == 'Windows'
+        working-directory: dioxus-frontend
         env:
-          GITHUB_TOKEN: ${{ secrets.RELEASE_TOKEN }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          BUNDLE_TYPES: ${{ matrix.bundle-types }}
+        shell: pwsh
+        run: dx bundle --platform desktop --release --no-default-features --features desktop --package-types "$env:BUNDLE_TYPES" --out-dir "$env:GITHUB_WORKSPACE/dist/desktop"
+
+      - name: Build desktop bundle (macOS)
+        if: runner.os == 'macOS'
+        working-directory: dioxus-frontend
+        shell: bash
+        run: |
+          dx bundle --platform desktop --release --no-default-features --features desktop \
+            --package-types macos \
+            --package-types dmg \
+            --package-types updater \
+            --out-dir "$GITHUB_WORKSPACE/dist/desktop"
+
+      - name: Collect Windows installer
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          $version = $env:RELEASE_TAG.Substring(1)
+          $out = Join-Path $env:GITHUB_WORKSPACE 'dist\desktop'
+          $artifact = Join-Path $env:GITHUB_WORKSPACE 'dist\release-assets'
+          New-Item -ItemType Directory -Force -Path $artifact | Out-Null
+          $installer = Get-ChildItem -Path $out -Filter '*.exe' -File | Select-Object -First 1
+          if (-not $installer) { throw 'Dioxus did not produce the Windows NSIS installer.' }
+          Copy-Item $installer.FullName (Join-Path $artifact "Wavelength_${version}_windows_x86_64.exe")
+
+      - name: Collect macOS packages
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          version="${RELEASE_TAG#v}"
+          out="$GITHUB_WORKSPACE/dist/desktop"
+          artifact="$GITHUB_WORKSPACE/dist/release-assets"
+          mkdir -p "$artifact"
+          app_archive="$(find "$out" -maxdepth 1 -type f -name '*.app.tar.gz' -print -quit)"
+          dmg="$(find "$out" -maxdepth 1 -type f -name '*.dmg' -print -quit)"
+          test -n "$app_archive" && test -n "$dmg" || {
+            echo "Dioxus did not produce both the macOS update archive and DMG." >&2
+            exit 1
+          }
+          cp "$app_archive" "$artifact/Wavelength_${version}_${PLATFORM}.app.tar.gz"
+          cp "$dmg" "$artifact/Wavelength_${version}_${PLATFORM}.dmg"
+
+      - uses: actions/upload-artifact@v4
         with:
-          projectPath: .
-          tagName: ${{ github.ref_name }}
-          releaseName: Wavelength ${{ github.ref_name }}
-          releaseBody: See the release notes for changes and fixes.
-          releaseDraft: false
-          prerelease: false
-          uploadUpdaterJson: true
-          args: --bundles ${{ matrix.bundle }}
+          name: release-assets-${{ matrix.platform }}
+          path: dist/release-assets/*
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-assets-*
+          path: dist/release-assets
+          merge-multiple: true
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Create signed update manifest
+        env:
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          UPDATE_SIGNING_PRIVATE_KEY: ${{ secrets.UPDATE_SIGNING_PRIVATE_KEY }}
+          UPDATE_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.UPDATE_SIGNING_PRIVATE_KEY_PASSWORD }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        shell: bash
+        run: |
+          version="${RELEASE_TAG#v}"
+          node scripts/create-update-manifest.mjs "$version" \
+            "windows-x86_64=dist/release-assets/Wavelength_${version}_windows_x86_64.exe" \
+            "darwin-x86_64=dist/release-assets/Wavelength_${version}_darwin-x86_64.app.tar.gz" \
+            "darwin-aarch64=dist/release-assets/Wavelength_${version}_darwin-aarch64.app.tar.gz"
+
+      - name: Publish desktop release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: Wavelength ${{ github.ref_name }}
+          generate_release_notes: true
+          files: |
+            dist/release-assets/*
+            latest.json

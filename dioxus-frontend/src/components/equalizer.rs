@@ -181,7 +181,7 @@ pub(crate) fn EqualizerPage(notice: Signal<String>) -> Element {
                                     return;
                                 }
                                 let preset = EqualizerPreset {
-                                    id: format!("custom-{}", js_sys::Date::now() as u64),
+                                    id: format!("custom-{}", crate::now_epoch_millis()),
                                     name: name.clone(),
                                     gains: gains(),
                                     frequencies: frequencies(),
@@ -240,34 +240,36 @@ pub(crate) fn EqualizerPage(notice: Signal<String>) -> Element {
                         onclick: move |event| {
                             if unavailable() { return; }
                             let point = event.element_coordinates();
-                            let (width, height) = match browser::equalizer_canvas_size() {
-                                Ok(size) => size,
-                                Err(error) => { notice.set(error); return; }
-                            };
-                            if let Some(index) = placement_band() {
-                                set_equalizer_graph_point(
-                                    index, point.x, point.y, width, height,
-                                    gains, frequencies, qs, types, preset_id, unavailable, notice,
-                                );
-                                persist_equalizer(&gains(), &frequencies(), &qs(), &types(), &preset_id(), notice);
-                                placement_band.set(None);
-                                if let Err(error) = browser::clear_equalizer_preview() {
-                                    notice.set(error);
+                            spawn(async move {
+                                let (width, height) = match browser::equalizer_canvas_size().await {
+                                    Ok(size) => size,
+                                    Err(error) => { notice.set(error); return; }
+                                };
+                                if let Some(index) = placement_band() {
+                                    set_equalizer_graph_point(
+                                        index, point.x, point.y, width, height,
+                                        gains, frequencies, qs, types, preset_id, unavailable, notice,
+                                    );
+                                    persist_equalizer(&gains(), &frequencies(), &qs(), &types(), &preset_id(), notice);
+                                    placement_band.set(None);
+                                    if let Err(error) = browser::clear_equalizer_preview() {
+                                        notice.set(error);
+                                    }
+                                } else if let Some(index) = equalizer_band_hit_test(
+                                    point.x, point.y, width, height, &frequencies(), &gains(),
+                                ) {
+                                    selected_band.set(index);
+                                    placement_band.set(Some(index));
+                                    if let Err(error) = browser::set_equalizer_preview(index as u32, point.x, point.y) {
+                                        notice.set(error);
+                                    }
+                                } else {
+                                    placement_band.set(None);
+                                    if let Err(error) = browser::clear_equalizer_preview() {
+                                        notice.set(error);
+                                    }
                                 }
-                            } else if let Some(index) = equalizer_band_hit_test(
-                                point.x, point.y, width, height, &frequencies(), &gains(),
-                            ) {
-                                selected_band.set(index);
-                                placement_band.set(Some(index));
-                                if let Err(error) = browser::set_equalizer_preview(index as u32, point.x, point.y) {
-                                    notice.set(error);
-                                }
-                            } else {
-                                placement_band.set(None);
-                                if let Err(error) = browser::clear_equalizer_preview() {
-                                    notice.set(error);
-                                }
-                            }
+                            });
                         },
                         onpointermove: move |event| {
                             let Some(index) = placement_band() else { return; };

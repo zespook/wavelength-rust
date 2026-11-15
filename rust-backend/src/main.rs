@@ -330,8 +330,8 @@ async fn main() {
 		spotify_sessions: Arc::new(Mutex::new(HashMap::new())),
 	};
 	let mut allowed_origins = vec![
-		HeaderValue::from_static("http://tauri.localhost"),
-		HeaderValue::from_static("tauri://localhost"),
+		HeaderValue::from_static("http://dioxus.index.html"),
+		HeaderValue::from_static("dioxus://index.html"),
 		HeaderValue::from_static("http://localhost:5173"),
 		HeaderValue::from_static("http://127.0.0.1:5173"),
 	];

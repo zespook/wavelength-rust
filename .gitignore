@@ -32,7 +32,9 @@ downloads/
 *.log
 
 # Generated desktop service bundle
-src-tauri/resources/services/
+dioxus-frontend/resources/services/
+dioxus-frontend/resources/services.zip
+dioxus-frontend/resources/services.tar.gz
 
 # Retired frontend outputs and local design references
 svelte-frontend/

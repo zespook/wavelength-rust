@@ -13,10 +13,14 @@ if (!packageName) {
 }
 
 const dx = process.platform === "win32" ? "dx.exe" : "dx";
-const build = spawnSync(dx, ["build", "--platform", "web", "--release"], {
+const build = spawnSync(
+  dx,
+  ["build", "--platform", "web", "--release", "--no-default-features", "--features", "web"],
+  {
   cwd: dioxusFrontend,
   stdio: "inherit",
-});
+  },
+);
 
 if (build.error) throw build.error;
 if (build.status !== 0) process.exit(build.status ?? 1);

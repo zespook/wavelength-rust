@@ -1,3 +1,4 @@
+use crate::UpdateInfo;
 use dioxus::prelude::*;
 
 #[component]
@@ -90,7 +91,7 @@ pub(crate) fn AppNotice(mut notice: Signal<String>) -> Element {
         }
 
         spawn(async move {
-            gloo_timers::future::TimeoutFuture::new(3800).await;
+            crate::sleep_ms(3800).await;
             if notice() == message {
                 notice.set(String::new());
             }
@@ -111,6 +112,62 @@ pub(crate) fn AppNotice(mut notice: Signal<String>) -> Element {
                 aria_label: "Dismiss notification",
                 onclick: move |_| notice.set(String::new()),
                 Icon { name: "close" }
+            }
+        }
+    }
+}
+
+#[component]
+pub(crate) fn UpdateNotice(
+    update: UpdateInfo,
+    mut available: Signal<Option<UpdateInfo>>,
+    mut dismissed_version: Signal<Option<String>>,
+    mut installing: Signal<bool>,
+    mut notice: Signal<String>,
+) -> Element {
+    let version = update.version.clone();
+    let install_version = version.clone();
+    let dismiss_version = version.clone();
+    let notes = update.notes.filter(|notes| !notes.trim().is_empty());
+
+    rsx! {
+        div { class: "app-notice update-notice", role: "status", aria_live: "polite",
+            div { class: "update-notice-copy",
+                strong { "Wavelength {version} is available" }
+                if let Some(notes) = notes {
+                    small { "{notes}" }
+                }
+            }
+            div { class: "update-notice-actions",
+                button {
+                    class: "solid-button compact-action",
+                    disabled: installing(),
+                    onclick: move |_| {
+                        let version = install_version.clone();
+                        installing.set(true);
+                        spawn(async move {
+                            match crate::browser::install_update(&version).await {
+                                Ok(()) => {}
+                                Err(error) => {
+                                    installing.set(false);
+                                    notice.set(format!("Update installation failed: {error}"));
+                                }
+                            }
+                        });
+                    },
+                    if installing() { "Installing…" } else { "Install update" }
+                }
+                button {
+                    class: "icon-button app-notice-dismiss",
+                    r#type: "button",
+                    aria_label: "Dismiss update notification",
+                    disabled: installing(),
+                    onclick: move |_| {
+                        dismissed_version.set(Some(dismiss_version.clone()));
+                        available.set(None);
+                    },
+                    Icon { name: "close" }
+                }
             }
         }
     }

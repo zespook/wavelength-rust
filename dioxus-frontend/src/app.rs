@@ -1,9 +1,8 @@
 use crate::browser;
-use crate::components::{AppNotice, Icon, QueueDownloadIndicator};
+use crate::components::{AppNotice, Icon, QueueDownloadIndicator, UpdateNotice};
 use crate::*;
 use dioxus::html::{input_data::MouseButton, point_interaction::PointerInteraction};
 use dioxus::prelude::*;
-use wasm_bindgen::{JsCast, closure::Closure};
 
 #[derive(Clone, Copy)]
 struct AppState {
@@ -73,6 +72,10 @@ struct AppState {
     media_duration: Signal<f64>,
     busy: Signal<bool>,
     notice: Signal<String>,
+    update_available: Signal<Option<UpdateInfo>>,
+    update_dismissed_version: Signal<Option<String>>,
+    update_checking: Signal<bool>,
+    update_installing: Signal<bool>,
     activity_logs: Signal<Vec<ActivityLog>>,
     activity_error: Signal<String>,
     activity_loading: Signal<bool>,
@@ -195,6 +198,10 @@ pub(crate) fn App() -> Element {
     let mut media_duration = use_signal(|| 0.0f64);
     let busy = use_signal(|| false);
     let mut notice = use_signal(String::new);
+    let mut update_available = use_signal(|| Option::<UpdateInfo>::None);
+    let update_dismissed_version = use_signal(|| Option::<String>::None);
+    let mut update_checking = use_signal(|| false);
+    let update_installing = use_signal(|| false);
     let activity_logs = use_signal(Vec::<ActivityLog>::new);
     let activity_error = use_signal(String::new);
     let activity_loading = use_signal(|| false);
@@ -312,6 +319,10 @@ pub(crate) fn App() -> Element {
         media_duration,
         busy,
         notice,
+        update_available,
+        update_dismissed_version,
+        update_checking,
+        update_installing,
         activity_logs,
         activity_error,
         activity_loading,
@@ -385,13 +396,11 @@ pub(crate) fn App() -> Element {
     });
 
     use_effect(move || {
-        let callback = Closure::wrap(Box::new(move |is_narrow: bool| {
+        if let Err(error) = browser::watch_narrow_window(move |is_narrow: bool| {
             narrow_window.set(is_narrow);
-        }) as Box<dyn FnMut(bool)>);
-        if let Err(error) = browser::watch_narrow_window(callback.as_ref().unchecked_ref()) {
+        }) {
             notice.set(error);
         }
-        callback.forget();
     });
 
     use_effect(move || {
@@ -434,13 +443,42 @@ pub(crate) fn App() -> Element {
     });
 
     use_effect(move || {
-        match browser::is_tauri_window() {
+        match browser::is_desktop_window() {
             Ok(available) => window_controls_available.set(available),
             Err(error) => notice.set(error),
         }
         if let Err(error) = browser::install_window_dragging() {
             notice.set(error);
         }
+    });
+
+    use_effect(move || {
+        match browser::is_desktop_window() {
+            Ok(false) => return,
+            Err(error) => {
+                notice.set(error);
+                return;
+            }
+            Ok(true) => {}
+        }
+        spawn(async move {
+            crate::sleep_ms(10_000).await;
+            loop {
+                update_checking.set(true);
+                match browser::check_for_updates().await {
+                    Ok(update) => {
+                        if update.as_ref().map(|update| update.version.as_str())
+                            != update_dismissed_version().as_deref()
+                        {
+                            update_available.set(update);
+                        }
+                    }
+                    Err(error) => notice.set(format!("Unable to check for updates: {error}")),
+                }
+                update_checking.set(false);
+                crate::sleep_ms(6 * 60 * 60 * 1000).await;
+            }
+        });
     });
 
     use_effect(move || {
@@ -491,7 +529,7 @@ pub(crate) fn App() -> Element {
                         }
                     }
                 }
-                gloo_timers::future::TimeoutFuture::new(poll_delay_ms).await;
+                crate::sleep_ms(poll_delay_ms as u64).await;
             }
         });
     });
@@ -1228,6 +1266,15 @@ pub(crate) fn App() -> Element {
                     section { class: "content-inner page-layout {page().class()}", aria_label: "Page content",
                         pages::PageContent {}
                         AppNotice { notice }
+                        if let Some(update) = update_available() {
+                            UpdateNotice {
+                                update,
+                                available: update_available,
+                                dismissed_version: update_dismissed_version,
+                                installing: update_installing,
+                                notice
+                            }
+                        }
                     }
                 }
                 if queue_panel_open() {
@@ -1522,22 +1569,26 @@ pub(crate) fn App() -> Element {
                     src: if audio_src().is_empty() { None } else { Some(audio_src()) },
                     preload: "metadata",
                     onloadedmetadata: move |_| {
-                        match browser::audio_time() {
-                            Ok((position, duration)) => {
-                                playhead.set(position);
-                                media_duration.set(duration);
+                        spawn(async move {
+                            match browser::audio_time().await {
+                                Ok((position, duration)) => {
+                                    playhead.set(position);
+                                    media_duration.set(duration);
+                                }
+                                Err(error) => notice.set(error),
                             }
-                            Err(error) => notice.set(error),
-                        }
+                        });
                     },
                     ontimeupdate: move |_| {
-                        match browser::audio_time() {
-                            Ok((position, duration)) => {
-                                playhead.set(position);
-                                media_duration.set(duration);
+                        spawn(async move {
+                            match browser::audio_time().await {
+                                Ok((position, duration)) => {
+                                    playhead.set(position);
+                                    media_duration.set(duration);
+                                }
+                                Err(error) => notice.set(error),
                             }
-                            Err(error) => notice.set(error),
-                        }
+                        });
                     },
                     onended: move |_| handle_track_ended(
                         current,
@@ -1767,7 +1818,7 @@ pub(crate) fn App() -> Element {
                             );
                             let track_count = tracks.len();
                             all.push(Playlist {
-                                id: format!("playlist-{}", js_sys::Date::now() as u64),
+                                id: format!("playlist-{}", crate::now_epoch_millis()),
                                 name: name.clone(),
                                 tracks,
                             });
@@ -2048,7 +2099,7 @@ pub(crate) fn App() -> Element {
                                         }
                                         button { onclick: move |_| {
                                             let playlist = Playlist {
-                                                id: format!("playlist-{}", js_sys::Date::now() as u64),
+                                                id: format!("playlist-{}", crate::now_epoch_millis()),
                                                 name: create_target.title.clone(),
                                                 tracks: vec![create_target.clone()],
                                             };
