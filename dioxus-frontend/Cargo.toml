@@ -54,7 +54,7 @@ flate2 = { version = "1", optional = true }
 keyring = { version = "3", optional = true }
 minisign-verify = { version = "0.3", optional = true }
 open = { version = "5", optional = true }
-reqwest = { version = "0.12", features = ["json"], optional = true }
+reqwest = { version = "0.12", features = ["blocking", "json"], optional = true }
 rfd = { version = "0.17", default-features = false, features = ["xdg-portal"], optional = true }
 semver = { version = "1", optional = true }
 sha2 = { version = "0.10", optional = true }

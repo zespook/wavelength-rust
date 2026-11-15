@@ -59,3 +59,7 @@ brio-settings-rust/target/
 .vscode/
 .design-references/
 .svelte-frontend/
+DESKTOP.md
+MIGRATION.md
+UPDATES.md
+.audio-service/test/

@@ -1,0 +1,13 @@
+#!/bin/bash
+set -euo pipefail
+
+TARGET_VOLUME="${2:-/}"
+APP_BUNDLE="$TARGET_VOLUME/Applications/Wavelength.app"
+APP_EXECUTABLE="$APP_BUNDLE/Contents/MacOS/wavelength"
+
+if [[ ! -x "$APP_EXECUTABLE" ]]; then
+	echo "The installed Wavelength application executable was not found." >&2
+	exit 1
+fi
+
+"$APP_EXECUTABLE" --install-services

@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 const scriptDir = fileURLToPath(new URL(".", import.meta.url));
 const [version, ...assetSpecs] = process.argv.slice(2);
 const repository = process.env.GITHUB_REPOSITORY;
+const supportedPlatforms = new Set(["windows-x86_64", "darwin-x86_64", "darwin-aarch64"]);
 
 if (!/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(version ?? "")) {
   throw new Error("Provide a semantic release version.");
@@ -25,13 +26,16 @@ try {
   const assets = assetSpecs.map(spec => {
     const separator = spec.indexOf("=");
     if (separator <= 0) throw new Error(`Invalid update asset specification: ${spec}`);
-    const platform = spec.slice(0, separator);
+    const assetType = spec.slice(0, separator);
+    const service = assetType.startsWith("service-");
+    const platform = service ? assetType.slice("service-".length) : assetType;
     const path = resolve(spec.slice(separator + 1));
-    if (!["windows-x86_64", "darwin-x86_64", "darwin-aarch64"].includes(platform)) {
-      throw new Error(`Unsupported update platform: ${platform}`);
+    if (!supportedPlatforms.has(platform)) {
+      throw new Error(`Unsupported release platform: ${platform}`);
     }
     return {
       platform,
+      service,
       path,
       signaturePath: join(signatureDir, `${basename(path)}.minisig`),
     };
@@ -57,13 +61,18 @@ try {
     throw new Error(`Update signing failed with exit code ${signer.status}.`);
   }
 
-  const platforms = Object.fromEntries(assets.map(({ platform, path, signaturePath }) => [
+  const platforms = Object.fromEntries(assets.filter(({ service }) => !service).map(({ platform, path, signaturePath }) => [
     platform,
     {
       url: `https://github.com/${repository}/releases/download/v${version}/${basename(path)}`,
       signature: readFileSync(signaturePath, "utf8").trim(),
     },
   ]));
+  for (const { service, path, signaturePath } of assets) {
+    if (service) {
+      writeFileSync(`${path}.minisig`, readFileSync(signaturePath));
+    }
+  }
   writeFileSync(
     "latest.json",
     `${JSON.stringify({

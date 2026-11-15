@@ -1,6 +1,6 @@
 # Desktop updates
 
-Desktop releases are published from GitHub tags matching `v*`. The workflow builds a Windows installer and macOS DMGs, signs the update packages, and publishes a `latest.json` feed. Native Dioxus clients verify package signatures before installing.
+Desktop releases are published from GitHub tags matching `v*`. The workflow builds Windows and macOS installers, separate signed service archives, and a `latest.json` feed. Native Dioxus clients verify package signatures before installing.
 
 ## Publish a release
 
@@ -13,7 +13,7 @@ Desktop releases are published from GitHub tags matching `v*`. The workflow buil
 	git push origin v0.2.0
 	```
 
-The `Release Wavelength Desktop` workflow runs on `v*` tags and requires the tag version to match `dioxus-frontend/Cargo.toml`. It packages the local services for each OS, bundles the native Dioxus app, signs each install/update package, and publishes the assets and `latest.json`. Keep the signing key pair stable across releases; installed clients use the public key embedded in the app to verify updates.
+The `Release Wavelength Desktop` workflow runs on `v*` tags and requires the tag version to match `dioxus-frontend/Cargo.toml`. It packages the local services separately from the native app, signs the app packages and service archives, and publishes the assets and `latest.json`. Keep the signing key pair stable across releases; installed clients use the public key embedded in the app to verify both updates and service downloads.
 
 ## Install an update
 
@@ -21,11 +21,13 @@ Desktop clients check for updates 10 seconds after launch and every six hours wh
 
 The app must embed the updater public key that matches the release signing key. The app points to `https://github.com/zespook/wavelength-rust/releases/latest/download/latest.json`; manually install a signed release first if an existing build predates updater support or uses a different key. Later signed releases can then be installed from the app.
 
+Windows NSIS and macOS PKG installers download the matching platform's service archive during installation, verify its Minisign signature, and install it with the app. macOS in-app updates do the same before relaunching the updated app. These operations require an internet connection; app bundles installed manually can still prepare services on first launch.
+
 ## One-time signing setup
 
 1. Generate a new Minisign key pair for this repository with `minisign -G`. Update `UPDATE_PUBLIC_KEY` in `dioxus-frontend/src/desktop.rs` to the new public key before releasing. Do not commit the private key.
-2. Add the private key contents as the GitHub Actions secret `UPDATE_SIGNING_PRIVATE_KEY`.
+2. Add the complete `minisign.key` file contents as the GitHub Actions secret `UPDATE_SIGNING_PRIVATE_KEY`, including both the comment line and encoded-key line. Do not enter the file path or only one line.
 3. If the key is password-protected, add its password as `UPDATE_SIGNING_PRIVATE_KEY_PASSWORD`. Leave that secret unset for an unencrypted key.
 4. Update the version in `dioxus-frontend/Cargo.toml`, then push a matching tag such as `v0.2.0`.
 
-The private key must never be committed. Existing installs that trust the previous public key will not accept releases signed with the new key; distribute a build containing the new public key manually first. The release workflow derives update asset URLs from the repository running it. macOS packages are built for both Intel and Apple Silicon; Windows packages are built for x86-64.
+The private key must never be committed. Existing installs that trust the previous public key will not accept releases signed with the new key; distribute a build containing the new public key manually first. The release workflow derives update asset URLs from the repository running it. macOS releases target Intel and Apple Silicon; Windows releases target x86-64.

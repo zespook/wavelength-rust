@@ -4933,6 +4933,7 @@ dependencies = [
  "cookie",
  "cookie_store",
  "encoding_rs",
+ "futures-channel",
  "futures-core",
  "futures-util",
  "h2",
@@ -6364,7 +6365,7 @@ dependencies = [
 
 [[package]]
 name = "wavelength-dioxus-frontend"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "base64 0.22.1",
  "chrono",

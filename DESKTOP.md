@@ -17,7 +17,7 @@ Room host control uses a random bearer token saved in the app's local storage so
 
 ## Local Development
 
-From the repository root, run `npm run dev` for the Dioxus web app or `npm run desktop:dev` for the native desktop app. The web launcher starts the local Qobuz API on `127.0.0.1:8000`, the audio/SpotiFLAC service on `127.0.0.1:8787`, and Dioxus on port `8080`. The desktop app starts its bundled audio service itself. Neither launcher starts MongoDB or the room API; follow the server setup in [README.md](./README.md) if you need shared listening. Register the Dioxus development Redirect URI listed above when using the web build. The audio service's separate Spotify catalog search uses `SPOTIFY_CLIENT_ID` and `SPOTIFY_CLIENT_SECRET` from the repository `.env`; these are not needed for the app's account-link feature. YouTube search does not require Spotify credentials. If the system Python lacks the service dependencies, the web launcher creates a virtual environment and installs both service requirements.
+From the repository root, run `npm run dev` for the Dioxus web app or `npm run desktop:dev` for the native desktop app. The web launcher starts the local Qobuz API on `127.0.0.1:8000`, the audio/SpotiFLAC service on `127.0.0.1:8787`, and Dioxus on port `8080`. The desktop development launcher packages and starts its local audio service. Neither launcher starts MongoDB or the room API; follow the server setup in [README.md](./README.md) if you need shared listening. Register the Dioxus development Redirect URI listed above when using the web build. The audio service's separate Spotify catalog search uses `SPOTIFY_CLIENT_ID` and `SPOTIFY_CLIENT_SECRET` from the repository `.env`; these are not needed for the app's account-link feature. YouTube search does not require Spotify credentials. If the system Python lacks the service dependencies, the web launcher creates a virtual environment and installs both service requirements.
 
 Firefox does not let a web app write into an arbitrary folder. It imports selected folders as snapshots stored in browser storage; add the folder again to include later changes. Browser downloads use Firefox's configured download location, which can be changed in Firefox Settings under General > Files and Applications. Use the Wavelength desktop app's native folder picker to choose an app-specific custom download folder. Large imported folders may exceed browser storage limits.
 
@@ -30,7 +30,7 @@ npm install
 npm run desktop:build
 ```
 
-The NSIS installer is written under `dist/desktop/`. WebView2 is provided by Windows and is not included in the installer. Production distribution should use a Windows code-signing certificate.
+The NSIS installer is written under `dist/desktop/`. During installation, it downloads and verifies the signed local-service archive from the matching GitHub Release. It also uses the small WebView2 bootstrapper to download the runtime if it is not already present. Both downloads require an internet connection. Production distribution should use a Windows code-signing certificate.
 
 ## Build for macOS
 
@@ -41,7 +41,7 @@ npm install
 npm run desktop:build:unix
 ```
 
-The script packages the local services for the host OS before running `dx bundle`. macOS bundles are written to `dist/desktop/`. Linux desktop packaging is not currently configured.
+The script packages the local services for the host OS before running `dx bundle`. Local macOS builds are written to `dist/desktop/`; GitHub releases target Intel and Apple Silicon and provide a PKG installer that downloads and verifies the signed local-service archive during installation. The PKG requires an internet connection. Apple Developer ID signing and notarization are not configured; production distribution should add them. Locally built app bundles still need a matching service archive available on first launch. Linux desktop packaging is not currently configured.
 
 ## Room Playback
 

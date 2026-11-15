@@ -34,12 +34,24 @@ fn sign_assets(
     Ok(())
 }
 
+fn validate_secret_key_contents(contents: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let mut lines = contents.lines().filter(|line| !line.trim().is_empty());
+    if lines.next().is_none() || lines.next().is_none() {
+        return Err(
+            "UPDATE_SIGNING_PRIVATE_KEY must contain the complete Minisign key file, including its comment and encoded-key lines."
+                .into(),
+        );
+    }
+    Ok(())
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let paths = env::args_os().skip(1).map(PathBuf::from).collect::<Vec<_>>();
     if paths.is_empty() || paths.len() % 2 != 0 {
         return Err("Supply one or more asset and signature path pairs.".into());
     }
     let key = env::var("UPDATE_SIGNING_PRIVATE_KEY")?;
+    validate_secret_key_contents(&key)?;
     let public_key = env::var("UPDATE_SIGNING_PUBLIC_KEY")?;
     let password = env::var("UPDATE_SIGNING_PRIVATE_KEY_PASSWORD")
         .ok()
@@ -55,13 +67,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 #[cfg(test)]
 mod tests {
-    use super::sign_assets;
+    use super::{sign_assets, validate_secret_key_contents};
     use minisign::{KeyPair, PublicKey, SecretKey, SignatureBox};
     use std::{
         fs::{self, File},
         path::PathBuf,
         time::{SystemTime, UNIX_EPOCH},
     };
+
+    #[test]
+    fn rejects_a_private_key_secret_without_its_encoded_key_line() {
+        assert!(validate_secret_key_contents("untrusted comment: minisign key\n").is_err());
+        assert!(validate_secret_key_contents(
+            "untrusted comment: minisign key\nencoded-key-line\n"
+        )
+        .is_ok());
+    }
 
     #[test]
     fn signs_each_asset_with_the_configured_key() {

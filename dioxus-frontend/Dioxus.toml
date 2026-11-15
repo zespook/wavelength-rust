@@ -19,7 +19,7 @@ short_description = "A desktop music player with shared listening"
 icon = ["icons/icon.png", "icons/icon.ico", "icons/icon.icns"]
 
 [bundle.windows]
-resources = ["resources/services.zip"]
+webview_install_mode = { DownloadBootstrapper = { silent = true } }
 
-[bundle.macos]
-resources = ["resources/services.tar.gz"]
+[bundle.windows.nsis]
+installer_hooks = "../scripts/install-services.nsi"

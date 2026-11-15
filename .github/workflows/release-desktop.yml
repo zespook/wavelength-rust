@@ -17,7 +17,7 @@ jobs:
           - runner: windows-latest
             platform: windows-x86_64
             bundle-types: nsis
-          - runner: macos-13
+          - runner: macos-15-intel
             platform: darwin-x86_64
           - runner: macos-latest
             platform: darwin-aarch64
@@ -88,7 +88,6 @@ jobs:
         run: |
           dx bundle --platform desktop --release --no-default-features --features desktop \
             --package-types macos \
-            --package-types dmg \
             --package-types updater \
             --out-dir "$GITHUB_WORKSPACE/dist/desktop"
 
@@ -105,6 +104,9 @@ jobs:
           $installer = Get-ChildItem -Path $out -Filter '*.exe' -File | Select-Object -First 1
           if (-not $installer) { throw 'Dioxus did not produce the Windows NSIS installer.' }
           Copy-Item $installer.FullName (Join-Path $artifact "Wavelength_${version}_windows_x86_64.exe")
+          $services = Join-Path $env:GITHUB_WORKSPACE 'dioxus-frontend\resources\services.zip'
+          if (-not (Test-Path $services -PathType Leaf)) { throw 'The Windows service archive is missing.' }
+          Copy-Item $services (Join-Path $artifact 'Wavelength_services_windows_x86_64.zip')
 
       - name: Collect macOS packages
         if: runner.os == 'macOS'
@@ -116,15 +118,18 @@ jobs:
           version="${RELEASE_TAG#v}"
           out="$GITHUB_WORKSPACE/dist/desktop"
           artifact="$GITHUB_WORKSPACE/dist/release-assets"
+          services="$GITHUB_WORKSPACE/dioxus-frontend/resources/services.tar.gz"
           mkdir -p "$artifact"
           app_archive="$(find "$out" -maxdepth 1 -type f -name '*.app.tar.gz' -print -quit)"
-          dmg="$(find "$out" -maxdepth 1 -type f -name '*.dmg' -print -quit)"
-          test -n "$app_archive" && test -n "$dmg" || {
-            echo "Dioxus did not produce both the macOS update archive and DMG." >&2
+          pkg="$out/Wavelength_${version}_${PLATFORM}.pkg"
+          test -n "$app_archive" && test -f "$services" || {
+            echo "Dioxus or service packaging did not produce the expected macOS release assets." >&2
             exit 1
           }
+          bash scripts/package-macos-pkg.sh "$version" "$app_archive" "$pkg"
           cp "$app_archive" "$artifact/Wavelength_${version}_${PLATFORM}.app.tar.gz"
-          cp "$dmg" "$artifact/Wavelength_${version}_${PLATFORM}.dmg"
+          cp "$pkg" "$artifact/Wavelength_${version}_${PLATFORM}.pkg"
+          cp "$services" "$artifact/Wavelength_services_${PLATFORM}.tar.gz"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -158,7 +163,10 @@ jobs:
           node scripts/create-update-manifest.mjs "$version" \
             "windows-x86_64=dist/release-assets/Wavelength_${version}_windows_x86_64.exe" \
             "darwin-x86_64=dist/release-assets/Wavelength_${version}_darwin-x86_64.app.tar.gz" \
-            "darwin-aarch64=dist/release-assets/Wavelength_${version}_darwin-aarch64.app.tar.gz"
+            "darwin-aarch64=dist/release-assets/Wavelength_${version}_darwin-aarch64.app.tar.gz" \
+            "service-windows-x86_64=dist/release-assets/Wavelength_services_windows_x86_64.zip" \
+            "service-darwin-x86_64=dist/release-assets/Wavelength_services_darwin-x86_64.tar.gz" \
+            "service-darwin-aarch64=dist/release-assets/Wavelength_services_darwin-aarch64.tar.gz"
 
       - name: Publish desktop release
         uses: softprops/action-gh-release@v2
