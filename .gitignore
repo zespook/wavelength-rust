@@ -14,6 +14,18 @@ htmlcov/
 coverage.xml
 *.tsbuildinfo
 
+# Tests
+**/test/
+**/tests/
+**/__tests__/
+**/*test*
+**/*spec*
+
+# Markdown docs except README files
+*.md
+![Rr][Ee][Aa][Dd][Mm][Ee].md
+!**/[Rr][Ee][Aa][Dd][Mm][Ee].md
+
 # Python
 __pycache__/
 *.py[cod]
@@ -59,7 +71,3 @@ brio-settings-rust/target/
 .vscode/
 .design-references/
 .svelte-frontend/
-DESKTOP.md
-MIGRATION.md
-UPDATES.md
-.audio-service/test/
