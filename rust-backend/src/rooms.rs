@@ -365,17 +365,95 @@ fn verify_room_server_passcode(passcode: &str, hash: &str) -> Result<bool, bcryp
     bcrypt::verify(passcode_bcrypt_input(passcode), hash)
 }
 
-fn client_ip(peer: SocketAddr, headers: &HeaderMap, trusted_proxies: &HashSet<IpAddr>) -> IpAddr {
-    if trusted_proxies.contains(&peer.ip()) {
-        if let Some(ip) = headers
-            .get("x-real-ip")
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.trim().parse().ok())
+fn parse_proxy_ip(value: &str) -> Option<IpAddr> {
+    let value = value.trim().trim_matches('"');
+    if let Ok(address) = value.parse() {
+        return Some(address);
+    }
+    if let Some(value) = value.strip_prefix('[') {
+        let (address, suffix) = value.split_once(']')?;
+        if !suffix.is_empty()
+            && (!suffix.starts_with(':') || suffix[1..].parse::<u16>().is_err())
         {
-            return ip;
+            return None;
+        }
+        return address.parse().ok();
+    }
+    value.parse::<SocketAddr>().ok().map(|address| address.ip())
+}
+
+fn x_forwarded_for_chain(headers: &HeaderMap) -> Vec<Option<IpAddr>> {
+    let mut chain = Vec::new();
+    for value in headers.get_all("x-forwarded-for") {
+        if let Ok(value) = value.to_str() {
+            chain.extend(value.split(',').map(parse_proxy_ip));
         }
     }
-    peer.ip()
+    chain
+}
+
+fn forwarded_for_chain(headers: &HeaderMap) -> Vec<Option<IpAddr>> {
+    let mut chain = Vec::new();
+    for value in headers.get_all("forwarded") {
+        let Ok(value) = value.to_str() else {
+            continue;
+        };
+        for element in value.split(',') {
+            let address = element.split(';').find_map(|parameter| {
+                let (name, value) = parameter.trim().split_once('=')?;
+                name.eq_ignore_ascii_case("for").then_some(value)
+            });
+            chain.push(address.and_then(parse_proxy_ip));
+        }
+    }
+    chain
+}
+
+fn client_ip_from_chain(
+    peer: IpAddr,
+    chain: &[Option<IpAddr>],
+    trusted_proxies: &HashSet<IpAddr>,
+) -> Option<IpAddr> {
+    if !trusted_proxies.contains(&peer) {
+        return None;
+    }
+    let mut address = peer;
+    let mut found_forwarded_address = false;
+    for candidate in chain.iter().rev() {
+        if !trusted_proxies.contains(&address) {
+            break;
+        }
+        let Some(candidate) = candidate else {
+            break;
+        };
+        address = *candidate;
+        found_forwarded_address = true;
+    }
+    found_forwarded_address.then_some(address)
+}
+
+fn client_ip(peer: SocketAddr, headers: &HeaderMap, trusted_proxies: &HashSet<IpAddr>) -> IpAddr {
+    if !trusted_proxies.contains(&peer.ip()) {
+        return peer.ip();
+    }
+    for header in [
+        "cf-connecting-ip",
+        "true-client-ip",
+        "fastly-client-ip",
+        "x-real-ip",
+        "x-client-ip",
+    ] {
+        if let Some(address) = headers
+            .get(header)
+            .and_then(|value| value.to_str().ok())
+            .and_then(parse_proxy_ip)
+        {
+            return address;
+        }
+    }
+    client_ip_from_chain(peer.ip(), &x_forwarded_for_chain(headers), trusted_proxies)
+        .or_else(|| client_ip_from_chain(peer.ip(), &forwarded_for_chain(headers), trusted_proxies))
+        .unwrap_or(peer.ip())
 }
 
 fn token_matches(candidate: &str, expected_hash: &str) -> bool {
@@ -1902,6 +1980,72 @@ mod tests {
                 &trusted_proxies,
             ),
             "203.0.113.5".parse::<IpAddr>().unwrap(),
+        );
+    }
+
+    #[test]
+    fn cloudflare_client_ip_is_used_only_for_trusted_proxies() {
+        let proxy_ip: IpAddr = "192.0.2.10".parse().unwrap();
+        let client_address: IpAddr = "198.51.100.42".parse().unwrap();
+        let proxy = SocketAddr::new(proxy_ip, 8080);
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "cf-connecting-ip",
+            HeaderValue::from_static("198.51.100.42"),
+        );
+        let trusted_proxies = HashSet::from([proxy_ip]);
+
+        assert_eq!(client_ip(proxy, &headers, &trusted_proxies), client_address);
+        assert_eq!(
+            client_ip(
+                SocketAddr::new("203.0.113.5".parse().unwrap(), 8080),
+                &headers,
+                &trusted_proxies,
+            ),
+            "203.0.113.5".parse::<IpAddr>().unwrap(),
+        );
+    }
+
+    #[test]
+    fn x_forwarded_for_chain_skips_trusted_proxies_and_ignores_spoofed_prefixes() {
+        let proxy_ip: IpAddr = "192.0.2.10".parse().unwrap();
+        let upstream_proxy_ip: IpAddr = "192.0.2.11".parse().unwrap();
+        let client_address: IpAddr = "198.51.100.42".parse().unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-forwarded-for",
+            HeaderValue::from_static("203.0.113.9, 198.51.100.42, 192.0.2.11"),
+        );
+        let trusted_proxies = HashSet::from([proxy_ip, upstream_proxy_ip]);
+
+        assert_eq!(
+            client_ip(
+                SocketAddr::new(proxy_ip, 8080),
+                &headers,
+                &trusted_proxies,
+            ),
+            client_address,
+        );
+    }
+
+    #[test]
+    fn forwarded_header_supports_quoted_ipv6_addresses_with_ports() {
+        let proxy_ip: IpAddr = "192.0.2.10".parse().unwrap();
+        let client_address: IpAddr = "2001:db8::1".parse().unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "forwarded",
+            HeaderValue::from_static("for=\"[2001:db8::1]:4711\";proto=https"),
+        );
+        let trusted_proxies = HashSet::from([proxy_ip]);
+
+        assert_eq!(
+            client_ip(
+                SocketAddr::new(proxy_ip, 8080),
+                &headers,
+                &trusted_proxies,
+            ),
+            client_address,
         );
     }
 

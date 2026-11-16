@@ -668,6 +668,10 @@ pub(crate) fn App() -> Element {
                         }
                     }
                     Err(error) => {
+                        if error == "Too many attempts. Please wait before trying again" {
+                            notice.set(format!("Unable to restore the room session: {error}"));
+                            return;
+                        }
                         let queue_restore_error = if saved_role == "guest" {
                             restore_guest_queue(queue).err()
                         } else {

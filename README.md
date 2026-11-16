@@ -134,4 +134,10 @@ docker run -d \
   wavelength-rooms-api
 ```
 
-The server API is available at `http://localhost:5050`; it does not host the app UI. Enter that address in the app's Settings for same-device use, or use an HTTPS reverse proxy for remote clients. The local Dioxus origins on port `8080` are allowed by default. For a deployed web app, set `FRONTEND_URL` in the room server's `.env` to its exact HTTPS origin without a path, then restart the server. View server logs with `docker logs -f wavelength-rooms-api`. To stop the containers, run `docker stop wavelength-rooms-api wavelength-mongodb`. The persistent volumes remain so room data is preserved.
+The server API is available at `http://localhost:5050`; it does not host the app UI. Enter that address in the app's Settings for same-device use, or use an HTTPS reverse proxy for remote clients. The API accepts normal HTTP requests and Socket.IO WebSocket upgrades. A reverse proxy must route both `/api/...` and `/socket.io/` to the same API service and pass WebSocket upgrades. The local Dioxus origins on port `8080` are allowed by default. For a deployed web app, set `FRONTEND_URL` in the room server's `.env` to its exact HTTPS origin without a path, then restart the server.
+
+The server recognizes `CF-Connecting-IP`, `True-Client-IP`, `Fastly-Client-IP`, `X-Real-IP`, `X-Client-IP`, `X-Forwarded-For`, and the RFC `Forwarded` header. It ignores these headers unless the direct peer is listed in `ROOM_SERVER_TRUSTED_PROXIES`. Set every proxy hop's IP when relying on a forwarded chain, and configure proxies to set or append client-IP headers correctly. Never trust arbitrary client-supplied headers.
+
+For Cloudflare Tunnel, point the public hostname at the room API service (for example, `http://wavelength-rooms-api:5000`) without a path restriction and enable **WebSockets** in Cloudflare's **Network** settings. Set `ROOM_SERVER_TRUSTED_PROXIES` to the tunnel container's IP as seen by the API container; the API then reads `CF-Connecting-IP` only from that trusted proxy.
+
+View server logs with `docker logs -f wavelength-rooms-api`. To stop the containers, run `docker stop wavelength-rooms-api wavelength-mongodb`. The persistent volumes remain so room data is preserved.

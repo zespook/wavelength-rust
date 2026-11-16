@@ -1047,7 +1047,10 @@ function openRoomSocket() {
       console.error("Could not decode a room event.", error);
     }
   };
-  socket.onerror = () => roomSocketEvents.push({ event: "error", data: "Room socket connection failed." });
+  socket.onerror = () => roomSocketEvents.push({
+    event: "error",
+    data: "Room socket connection failed. Check that the server or proxy allows WebSocket upgrades on /socket.io/."
+  });
   socket.onclose = () => {
     if (roomSocket !== socket) return;
     roomSocketReady = false;
