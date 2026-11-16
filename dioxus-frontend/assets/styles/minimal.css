@@ -744,6 +744,17 @@ svg {
 	z-index: 22;
 }
 
+.right-rail {
+	padding: var(--space-4);
+	padding-left: var(--space-5);
+	overflow-x: hidden;
+	overflow-y: auto;
+}
+
+.right-rail > *:not(.rail-resizer) {
+	min-width: 0;
+}
+
 .right-rail .rail-resizer {
 	position: absolute;
 	inset: 0 auto 0 0;
@@ -793,15 +804,55 @@ svg {
 .party-room-rail {
 	display: grid;
 	align-content: start;
-	gap: var(--space-4);
+	gap: var(--space-3);
 }
 
 .party-room-rail .rail-heading {
 	margin-bottom: 0;
 }
 
+.party-room-rail .party-room-section {
+	gap: var(--space-3);
+	padding-top: var(--space-3);
+}
+
 .party-room-rail h2 {
 	font-size: calc(18px * var(--font-size-scale, 1));
+}
+
+.room-panel-summary {
+	display: grid;
+	gap: var(--space-2);
+	padding: var(--space-3);
+	border: 1px solid var(--line);
+	border-radius: var(--radius-small);
+	background: var(--panel);
+}
+
+.room-panel-status {
+	display: flex;
+	align-items: center;
+	gap: var(--space-2);
+}
+
+.room-status-indicator {
+	width: 8px;
+	height: 8px;
+	flex: 0 0 8px;
+	border-radius: 50%;
+	background: var(--quiet);
+}
+
+.room-status-indicator.connected {
+	background: var(--accent-strong);
+}
+
+.room-idle-policy,
+.room-section-hint {
+	margin: 0;
+	color: var(--muted);
+	font-size: calc(12px * var(--font-size-scale, 1));
+	line-height: 1.5;
 }
 
 .party-room-section,
@@ -822,6 +873,57 @@ svg {
 .room-session-role {
 	color: var(--muted);
 	font-size: calc(12px * var(--font-size-scale, 1));
+}
+
+.room-session-list {
+	display: grid;
+	gap: var(--space-1);
+	min-width: 0;
+}
+
+.room-session-button {
+	display: grid;
+	justify-items: start;
+	gap: var(--space-micro);
+	width: 100%;
+	min-width: 0;
+	padding: var(--space-2) var(--space-3);
+	border: 1px solid var(--line);
+	border-radius: var(--radius-small);
+	color: var(--muted);
+	text-align: left;
+}
+
+.room-session-button:hover,
+.room-session-button.active {
+	border-color: color-mix(in srgb, var(--accent-strong) 36%, var(--line));
+	background: var(--panel-hi);
+}
+
+.room-session-button:disabled {
+	opacity: 1;
+	cursor: default;
+}
+
+.room-session-button strong,
+.room-session-button small {
+	display: block;
+	width: 100%;
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	text-align: left;
+}
+
+.room-session-button strong {
+	color: var(--ink);
+	font-size: calc(13px * var(--font-size-scale, 1));
+	font-weight: 500;
+}
+
+.room-session-button small {
+	color: var(--muted);
 }
 
 .room-name-options {
@@ -878,6 +980,10 @@ svg {
 .party-member-empty {
 	color: var(--muted);
 	font-size: calc(12px * var(--font-size-scale, 1));
+}
+
+.party-member-empty {
+	padding: 0;
 }
 
 .guest-controls {
@@ -983,11 +1089,21 @@ svg {
 	gap: var(--space-1);
 }
 
+.rail-queue-list {
+	width: 100%;
+	min-width: 0;
+}
+
+.queue-rail .rail-empty {
+	padding-block: var(--space-3);
+}
+
 .queue-row {
 	display: grid;
 	grid-template-columns: 12px 40px minmax(0, 1fr) 32px 32px;
 	align-items: center;
 	gap: var(--space-2);
+	width: 100%;
 	min-width: 0;
 	min-height: 60px;
 	padding: var(--space-2) 0;
@@ -1067,7 +1183,6 @@ svg {
 }
 
 .rail-empty,
-.party-member-empty,
 .library-empty,
 .settings-empty,
 .download-log-empty,

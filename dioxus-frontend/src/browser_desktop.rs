@@ -7,15 +7,11 @@ async fn call_js<T: DeserializeOwned>(function: &str, arguments: &[Value]) -> Re
     let function = serde_json::to_string(function).map_err(|error| error.to_string())?;
     let arguments = serde_json::to_string(arguments).map_err(|error| error.to_string())?;
     let script = format!(
-        "(async()=>{{try{{const value=await globalThis.__WAVELENGTH_BROWSER__[{function}](...{arguments});const refreshToken=globalThis.__WAVELENGTH_BROWSER__.getSpotifyRefreshToken?.()||null;dioxus.send(JSON.stringify({{ok:true,value:value??null,refreshToken}}));}}catch(error){{dioxus.send(JSON.stringify({{ok:false,error:String(error?.message??error)}}));}}}})();"
+        "try{{const value=await globalThis.__WAVELENGTH_BROWSER__[{function}](...{arguments});const refreshToken=globalThis.__WAVELENGTH_BROWSER__.getSpotifyRefreshToken?.()||null;return {{ok:true,value:value??null,refreshToken}};}}catch(error){{return {{ok:false,error:String(error?.message??error)}};}}"
     );
-    let mut evaluation = dioxus::document::eval(&script);
-    let response = evaluation
-        .recv::<String>()
+    let response: Value = dioxus::document::eval(&script)
         .await
         .map_err(|error| format!("The app bridge failed: {error}"))?;
-    let response: Value = serde_json::from_str(&response)
-        .map_err(|error| format!("The app bridge returned invalid data: {error}"))?;
     if response.get("ok").and_then(Value::as_bool) != Some(true) {
         return Err(response
             .get("error")

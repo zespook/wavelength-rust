@@ -123,6 +123,7 @@ struct AppState {
     room_members: Signal<Vec<String>>,
     room_permissions: Signal<RoomPermissions>,
     room_shared_playlists: Signal<Vec<RoomSharedPlaylist>>,
+    room_sessions: Signal<Vec<RoomSession>>,
     room_panel_open: Signal<bool>,
     queue_panel_open: Signal<bool>,
     room_copy_feedback: Signal<String>,
@@ -250,6 +251,7 @@ pub(crate) fn App() -> Element {
     let room_members = use_signal(Vec::<String>::new);
     let room_permissions = use_signal(RoomPermissions::default);
     let room_shared_playlists = use_signal(Vec::<RoomSharedPlaylist>::new);
+    let room_sessions = use_signal(Vec::<RoomSession>::new);
     let mut room_panel_open = use_signal(|| false);
     let mut queue_panel_open = use_signal(|| false);
     let room_copy_feedback = use_signal(String::new);
@@ -372,6 +374,7 @@ pub(crate) fn App() -> Element {
         room_members,
         room_permissions,
         room_shared_playlists,
+        room_sessions,
         room_panel_open,
         queue_panel_open,
         room_copy_feedback,
@@ -566,6 +569,24 @@ pub(crate) fn App() -> Element {
         load_saved("wavelength-party-role", room_role, notice);
         load_saved("wavelength-party-host-token", room_host_token, notice);
         load_saved("wavelength-party-name", room_name, notice);
+        load_saved("wavelength-party-sessions", room_sessions, notice);
+        if !active_room_code().is_empty()
+            && !room_sessions().iter().any(|session| {
+                session.code == active_room_code() && session.room_url == room_url()
+            })
+        {
+            let session = RoomSession {
+                code: active_room_code(),
+                role: room_role(),
+                name: room_name(),
+                host_token: room_host_token(),
+                room_url: room_url(),
+                access_token: room_access(),
+            };
+            if let Err(error) = remember_room_session(room_sessions, session) {
+                notice.set(error);
+            }
+        }
         match browser::room_invite_code() {
             Ok(Some(code)) => {
                 room_code.set(code.to_ascii_uppercase());
@@ -616,7 +637,7 @@ pub(crate) fn App() -> Element {
                                     "The saved room session has expired. Queue restoration failed: {error}"
                                 ),
                             ));
-                            clear_saved_room_session(notice);
+                            clear_saved_room_session(room_sessions, &url, &code, notice);
                         } else if party.host == name && !party.host_authorized {
                             active_code.set(String::new());
                             role.set(String::new());
@@ -627,7 +648,7 @@ pub(crate) fn App() -> Element {
                                 "This room needs to be recreated before host controls can be used."
                                     .to_string(),
                             );
-                            clear_saved_room_session(notice);
+                            clear_saved_room_session(room_sessions, &url, &code, notice);
                         } else {
                             let restored_role = if party.host == name { "host" } else { "guest" };
                             members.set(party.members);
@@ -663,7 +684,7 @@ pub(crate) fn App() -> Element {
                                 "Unable to restore the room session: {error}. Queue restoration failed: {restore_error}"
                             ),
                         ));
-                        clear_saved_room_session(notice);
+                        clear_saved_room_session(room_sessions, &url, &code, notice);
                     }
                 }
             });
@@ -736,6 +757,7 @@ pub(crate) fn App() -> Element {
             room_members,
             room_permissions,
             room_shared_playlists,
+            room_sessions,
             playlists,
             queue,
             current,
@@ -1454,6 +1476,77 @@ pub(crate) fn App() -> Element {
                                 Icon { name: "close" }
                             }
                         }
+                        div { class: "room-panel-summary", aria_live: "polite",
+                            div { class: "room-panel-status",
+                                span {
+                                    class: if !active_room_code().is_empty() && !room_access().is_empty() {
+                                        "room-status-indicator connected"
+                                    } else {
+                                        "room-status-indicator"
+                                    }
+                                }
+                                strong {
+                                    if !active_room_code().is_empty() && !room_access().is_empty() {
+                                        "Room connected"
+                                    } else if !active_room_code().is_empty() {
+                                        "Reconnect to room"
+                                    } else {
+                                        "No active room"
+                                    }
+                                }
+                            }
+                            p { class: "room-idle-policy",
+                                "Rooms close automatically after five minutes without activity. Create a new room if it expires."
+                            }
+                        }
+                        if !room_sessions().is_empty() {
+                            section { class: "party-room-section party-room-sessions", aria_label: "Open rooms",
+                                h3 { class: "party-room-section-title", "Open rooms" }
+                                div { class: "room-session-list",
+                                    for session in room_sessions().iter().cloned() {
+                                        button {
+                                            class: if session.code == active_room_code()
+                                                && session.room_url == room_url()
+                                            {
+                                                "room-session-button active"
+                                            } else {
+                                                "room-session-button"
+                                            },
+                                            aria_label: format!("Open room {}", session.code),
+                                            disabled: session.code == active_room_code()
+                                                && session.room_url == room_url(),
+                                            onclick: move |_| switch_room(
+                                                session.clone(),
+                                                room_url,
+                                                room_url_input,
+                                                room_access,
+                                                room_sessions,
+                                                room_name,
+                                                active_room_code,
+                                                room_role,
+                                                room_host_token,
+                                                room_members,
+                                                room_permissions,
+                                                room_shared_playlists,
+                                                queue,
+                                                current,
+                                                audio_src,
+                                                playing,
+                                                playhead,
+                                                media_duration,
+                                                shuffle,
+                                                repeat_mode,
+                                                local_tracks,
+                                                history,
+                                                notice,
+                                            ),
+                                            strong { "{session.code}" }
+                                            small { "{session.name} · {session.role}" }
+                                        }
+                                    }
+                                }
+                            }
+                        }
                         if room_url().is_empty() {
                             p { class: "party-member-empty", "Add a room server in Settings to use shared listening." }
                             button { class: "outline-button", onclick: move |_| {
@@ -1483,7 +1576,8 @@ pub(crate) fn App() -> Element {
                             }
                             if room_role() == "host" {
                                 section { class: "party-room-section",
-                                    h3 { class: "party-room-section-title", "Controls" }
+                                    h3 { class: "party-room-section-title", "Guest permissions" }
+                                    p { class: "room-section-hint", "Choose what listeners can change during the session." }
                                     div { class: "guest-controls",
                                         label { class: "guest-control-toggle",
                                             span { "Allow guests to add tracks" }
@@ -1533,19 +1627,17 @@ pub(crate) fn App() -> Element {
                             }
                             div { class: "party-room-end-action",
                                 button { class: "outline-button compact-action", onclick: move |_| refresh_room(room_url, room_access, active_room_code, room_host_token, room_members, room_permissions, room_shared_playlists, notice), "Refresh room" }
-                                button { class: "outline-button compact-action", onclick: move |_| {
+                                button { class: if room_role() == "host" { "outline-button compact-action danger" } else { "outline-button compact-action" }, onclick: move |_| {
                                     end_room(room_url, room_access, room_name, active_room_code, room_role, room_host_token, room_members, room_permissions, room_shared_playlists, queue, notice);
                                     room_panel_open.set(false);
                                 },
-                                    if room_role() == "host" { "End session" } else { "Leave room" }
+                                    if room_role() == "host" { "Close room" } else { "Leave room" }
                                 }
                             }
                         } else {
-                            if room_access().is_empty() {
-                                p { class: "party-member-empty", "Connect with the server passcode in Settings before creating or joining a room." }
-                            } else {
-                                p { class: "party-member-empty", "Create a room or join listeners with a room code." }
-                            }
+                            p { class: "party-member-empty", "Create a room or join listeners with a room code." }
+                        }
+                        if !room_url().is_empty() && !room_access().is_empty() {
                             section { class: "party-room-form",
                                 if let Some(profile) = spotify_profile() {
                                     fieldset { class: "room-name-options",
@@ -1576,11 +1668,11 @@ pub(crate) fn App() -> Element {
                                 }
                                 label {
                                     span { "Room code" }
-                                    input { class: "room-server-input", value: "{room_code()}", maxlength: "6", placeholder: "Enter a code", aria_label: "Room code", oninput: move |event| room_code.set(event.value().to_ascii_uppercase()) }
+                                    input { class: "room-server-input", value: "{room_code()}", maxlength: "12", placeholder: "Enter a code", aria_label: "Room code", oninput: move |event| room_code.set(event.value().to_ascii_uppercase()) }
                                 }
                                 div { class: "party-room-form-actions",
-                                    button { class: "solid-button", disabled: room_access().is_empty(), onclick: move |_| join_room(room_url, room_access, room_name, room_code, active_room_code, room_role, room_members, room_permissions, room_shared_playlists, queue, notice), "Join room" }
-                                    button { class: "outline-button", disabled: room_access().is_empty(), onclick: move |_| create_room(room_url, room_access, room_name, room_name_mode, spotify_profile, room_code, active_room_code, room_role, room_host_token, room_members, room_permissions, room_shared_playlists, notice), "Create room" }
+                                    button { class: "solid-button", onclick: move |_| join_room(room_url, room_access, room_name, room_code, active_room_code, room_role, room_host_token, room_members, room_permissions, room_shared_playlists, room_sessions, queue, notice), "Join room" }
+                                    button { class: "outline-button", onclick: move |_| create_room(room_url, room_access, room_name, room_name_mode, spotify_profile, room_code, active_room_code, room_role, room_host_token, room_members, room_permissions, room_shared_playlists, room_sessions, notice), "Create room" }
                                 }
                             }
                         }

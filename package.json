@@ -4,8 +4,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\\start-local.ps1",
-    "dev:dioxus": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\\start-local.ps1",
+    "dev": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"%INIT_CWD%\\scripts\\start-local.ps1\"",
+    "dev:dioxus": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"%INIT_CWD%\\scripts\\start-local.ps1\"",
     "build:dioxus": "node scripts/build-dioxus.mjs",
     "desktop:dev": "node scripts/run-dioxus.mjs dev",
     "desktop:build": "node scripts/run-dioxus.mjs build",

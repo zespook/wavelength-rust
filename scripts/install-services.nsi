@@ -1,5 +1,9 @@
 !include "LogicLib.nsh"
 
+Function .onInit
+    ExecWait '"$SYSDIR\taskkill.exe" /IM wavelength.exe' $0
+FunctionEnd
+
 Section -InstallWavelengthServices
     GetDLLVersion "$INSTDIR\wavelength.exe" $R0 $R1
     IntOp $R2 $R0 >> 16

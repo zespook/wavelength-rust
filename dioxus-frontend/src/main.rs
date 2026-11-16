@@ -648,6 +648,17 @@ struct RoomParty {
     host_authorized: bool,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+struct RoomSession {
+    code: String,
+    role: String,
+    name: String,
+    host_token: String,
+    room_url: String,
+    access_token: String,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Deserialize, Serialize)]
 #[serde(default, rename_all = "camelCase")]
 struct RoomSharedPlaylist {
@@ -2257,6 +2268,47 @@ struct RoomResult {
     party: Option<RoomParty>,
 }
 
+fn switch_room(
+    session: RoomSession,
+    mut room_url: Signal<String>,
+    mut room_url_input: Signal<String>,
+    mut room_access: Signal<String>,
+    mut room_sessions: Signal<Vec<RoomSession>>,
+    mut room_name: Signal<String>,
+    mut active_room_code: Signal<String>,
+    mut room_role: Signal<String>,
+    mut room_host_token: Signal<String>,
+    mut room_members: Signal<Vec<String>>,
+    mut room_permissions: Signal<RoomPermissions>,
+    mut room_shared_playlists: Signal<Vec<RoomSharedPlaylist>>,
+    queue: Signal<Vec<Track>>,
+    current: Signal<Option<Track>>,
+    audio_src: Signal<String>,
+    mut playing: Signal<bool>,
+    mut playhead: Signal<f64>,
+    mut media_duration: Signal<f64>,
+    mut shuffle: Signal<bool>,
+    mut repeat_mode: Signal<String>,
+    mut local_tracks: Signal<Vec<Track>>,
+    mut history: Signal<Vec<Track>>,
+    mut notice: Signal<String>,
+) {
+    room_url_input.set(session.room_url.clone());
+    room_url.set(session.room_url.clone());
+    room_access.set(session.access_token.clone());
+    room_name.set(session.name.clone());
+    active_room_code.set(session.code.clone());
+    room_role.set(session.role.clone());
+    room_host_token.set(session.host_token.clone());
+    room_members.set(Vec::new());
+    room_permissions.set(RoomPermissions::default());
+    room_shared_playlists.set(Vec::new());
+    if let Err(error) = persist_active_room_session(&session) {
+        notice.set(error);
+    }
+    let _ = (queue, current, audio_src, playing, playhead, media_duration, shuffle, repeat_mode, local_tracks, history, room_sessions);
+}
+
 fn join_room(
     room_url: Signal<String>,
     access: Signal<String>,
@@ -2264,9 +2316,11 @@ fn join_room(
     room_code: Signal<String>,
     mut active_room_code: Signal<String>,
     mut room_role: Signal<String>,
+    room_host_token: Signal<String>,
     mut room_members: Signal<Vec<String>>,
     mut room_permissions: Signal<RoomPermissions>,
     mut room_shared_playlists: Signal<Vec<RoomSharedPlaylist>>,
+    mut room_sessions: Signal<Vec<RoomSession>>,
     queue: Signal<Vec<Track>>,
     mut notice: Signal<String>,
 ) {
@@ -2296,7 +2350,15 @@ fn join_room(
                     notice.set(error);
                     return;
                 }
-                if let Err(error) = persist_room_session(&room.code, "guest", &name, "") {
+                if let Err(error) = persist_room_session(
+                    room_sessions,
+                    &url,
+                    &room.code,
+                    "guest",
+                    &name,
+                    "",
+                    &token,
+                ) {
                     let cleanup_error = browser::remove_local("wavelength-pre-party-queue").err();
                     notice.set(cleanup_error.map_or_else(
                         || error.clone(),
@@ -2345,6 +2407,7 @@ fn create_room(
     mut room_members: Signal<Vec<String>>,
     mut room_permissions: Signal<RoomPermissions>,
     mut room_shared_playlists: Signal<Vec<RoomSharedPlaylist>>,
+    mut room_sessions: Signal<Vec<RoomSession>>,
     mut notice: Signal<String>,
 ) {
     let url = room_url();
@@ -2381,9 +2444,15 @@ fn create_room(
                 }
                 let party = room.party.unwrap_or_default();
                 let socket_permissions = party.permissions.clone();
-                if let Err(error) =
-                    persist_room_session(&room.code, "host", &name, &room.host_token)
-                {
+                if let Err(error) = persist_room_session(
+                    room_sessions,
+                    &url,
+                    &room.code,
+                    "host",
+                    &name,
+                    &room.host_token,
+                    &token,
+                ) {
                     notice.set(error);
                     return;
                 }
@@ -2415,21 +2484,76 @@ fn create_room(
     });
 }
 
+fn upsert_room_session(sessions: &mut Vec<RoomSession>, session: RoomSession) {
+    sessions.retain(|existing| {
+        existing.code != session.code || existing.room_url != session.room_url
+    });
+    sessions.push(session);
+}
+
+fn remove_room_session(sessions: &mut Vec<RoomSession>, room_url: &str, code: &str) -> bool {
+    let previous_len = sessions.len();
+    sessions.retain(|session| {
+        session.code != code
+            || session.room_url.trim_end_matches('/') != room_url.trim_end_matches('/')
+    });
+    sessions.len() != previous_len
+}
+
 fn persist_room_session(
+    mut room_sessions: Signal<Vec<RoomSession>>,
+    room_url: &str,
     code: &str,
     role: &str,
     name: &str,
     host_token: &str,
+    access_token: &str,
 ) -> Result<(), String> {
-    browser::save("wavelength-party-code", &code.to_string())?;
-    browser::save("wavelength-party-role", &role.to_string())?;
-    browser::save("wavelength-party-name", &name.to_string())?;
-    browser::save("wavelength-party-host-token", &host_token.to_string())?;
-    browser::save("wavelength-username", &name.to_string())
+    let session = RoomSession {
+        code: code.to_string(),
+        role: role.to_string(),
+        name: name.to_string(),
+        host_token: host_token.to_string(),
+        room_url: room_url.to_string(),
+        access_token: access_token.to_string(),
+    };
+    remember_room_session(room_sessions, session.clone())?;
+    persist_active_room_session(&session)
+}
+
+fn remember_room_session(
+    mut room_sessions: Signal<Vec<RoomSession>>,
+    session: RoomSession,
+) -> Result<(), String> {
+    let mut sessions = room_sessions();
+    upsert_room_session(&mut sessions, session);
+    browser::save("wavelength-party-sessions", &sessions)?;
+    room_sessions.set(sessions);
+    Ok(())
+}
+
+fn persist_active_room_session(session: &RoomSession) -> Result<(), String> {
+    browser::save("wavelength-party-code", &session.code)?;
+    browser::save("wavelength-party-role", &session.role)?;
+    browser::save("wavelength-party-name", &session.name)?;
+    browser::save("wavelength-party-host-token", &session.host_token)?;
+    browser::save("wavelength-room-url", &session.room_url)?;
+    browser::save("wavelength-room-access", &session.access_token)?;
+    browser::save("wavelength-username", &session.name)
+}
+
+fn clear_active_room_session() -> Result<(), String> {
+    browser::save("wavelength-party-code", &String::new())?;
+    browser::save("wavelength-party-role", &String::new())?;
+    browser::save("wavelength-party-name", &String::new())?;
+    browser::save("wavelength-party-host-token", &String::new())
 }
 
 fn backup_guest_queue(queue: &[Track]) -> Result<(), String> {
-    browser::save("wavelength-pre-party-queue", &queue.to_vec())
+    match browser::load::<Vec<Track>>("wavelength-pre-party-queue")? {
+        Some(_) => Ok(()),
+        None => browser::save("wavelength-pre-party-queue", &queue.to_vec()),
+    }
 }
 
 fn restore_guest_queue(mut queue: Signal<Vec<Track>>) -> Result<(), String> {
@@ -2462,13 +2586,27 @@ fn restore_guest_queue(mut queue: Signal<Vec<Track>>) -> Result<(), String> {
     restore_error.map_or(Ok(()), Err)
 }
 
-fn clear_saved_room_session(mut notice: Signal<String>) {
-    if let Err(error) = persist_room_session("", "", "", "") {
+fn clear_saved_room_session(
+    mut room_sessions: Signal<Vec<RoomSession>>,
+    room_url: &str,
+    code: &str,
+    mut notice: Signal<String>,
+) -> bool {
+    let mut sessions = room_sessions();
+    let removed = remove_room_session(&mut sessions, room_url, code);
+    if removed {
+        room_sessions.set(sessions.clone());
+        if let Err(error) = browser::save("wavelength-party-sessions", &sessions) {
+            notice.set(format!("Could not update saved room sessions: {error}"));
+        }
+    }
+    if let Err(error) = clear_active_room_session() {
         notice.set(format!("Could not clear the saved room session: {error}"));
     }
     if let Err(error) = browser::disconnect_room_socket() {
         notice.set(format!("Could not disconnect the room socket: {error}"));
     }
+    sessions.is_empty()
 }
 
 fn refresh_room(
@@ -2549,7 +2687,7 @@ fn end_room(
             .await
         {
             Ok(_) => {
-                let mut cleanup_error = persist_room_session("", "", "", "").err();
+                let mut cleanup_error = persist_active_room_session(&RoomSession::default()).err();
                 if role == "guest" {
                     if let Err(error) = restore_guest_queue(queue) {
                         cleanup_error.get_or_insert(error);
@@ -2768,6 +2906,7 @@ async fn room_sync_loop(
     mut room_members: Signal<Vec<String>>,
     mut room_permissions: Signal<RoomPermissions>,
     mut room_shared_playlists: Signal<Vec<RoomSharedPlaylist>>,
+    mut room_sessions: Signal<Vec<RoomSession>>,
     playlists: Signal<Vec<Playlist>>,
     mut queue: Signal<Vec<Track>>,
     mut current: Signal<Option<Track>>,
@@ -2918,7 +3057,7 @@ async fn room_sync_loop(
                                 "The room was closed by its host. Queue restoration failed: {error}"
                             ),
                         ));
-                        clear_saved_room_session(notice);
+                        clear_saved_room_session(room_sessions, &url, &code, notice);
                         break;
                     } else if event.event == "error" {
                         let error = event
@@ -3097,7 +3236,7 @@ async fn room_sync_loop(
                         room_members.set(Vec::new());
                         room_permissions.set(RoomPermissions::default());
                         room_shared_playlists.set(Vec::new());
-                        clear_saved_room_session(notice);
+                        clear_saved_room_session(room_sessions, &url, &code, notice);
                     }
                     continue;
                 }
@@ -3134,7 +3273,7 @@ async fn room_sync_loop(
                             "You are no longer a member of this room. Queue restoration failed: {error}"
                         ),
                     ));
-                    clear_saved_room_session(notice);
+                    clear_saved_room_session(room_sessions, &url, &code, notice);
                     continue;
                 }
                 room_members.set(party.members.clone());
@@ -3225,7 +3364,7 @@ async fn room_sync_loop(
                     room_members.set(Vec::new());
                     room_permissions.set(RoomPermissions::default());
                     room_shared_playlists.set(Vec::new());
-                    clear_saved_room_session(notice);
+                    clear_saved_room_session(room_sessions, &url, &code, notice);
                 }
             }
         }

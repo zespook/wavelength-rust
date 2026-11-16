@@ -23,11 +23,15 @@ use tower_http::cors::CorsLayer;
 use tracing::info;
 
 const ALPHABET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-const ROOM_CODE_LENGTH: usize = 12;
+const ROOM_CODE_LENGTH: usize = 4;
+const LEGACY_ROOM_CODE_LENGTH: usize = 12;
 const ROOM_SERVER_PASSCODE_BCRYPT_COST: u32 = 12;
 const MAX_RATE_LIMIT_CLIENTS: usize = 10_000;
 const MAX_ROOM_UPDATE_BYTES: usize = 8 * 1024 * 1024;
 const ROOM_ACCESS_TTL: Duration = Duration::from_secs(12 * 60 * 60);
+const ROOM_IDLE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+const ROOM_ACTIVITY_REFRESH: Duration = Duration::from_secs(30);
+const ROOM_CLEANUP_INTERVAL: Duration = Duration::from_secs(10);
 const RATE_LIMIT_WINDOW: Duration = Duration::from_secs(60);
 const SHARED_AUDIO_ACCESS_TTL: Duration = Duration::from_secs(30 * 60);
 const ROOM_ACCESS_REQUIRED_MESSAGE: &str = "Enter the server passcode in Settings to use this server";
@@ -332,8 +336,18 @@ fn clean(value: &str) -> String {
 fn normalize_code(value: &str) -> String { clean(value).to_uppercase() }
 fn valid_room_code(value: &str) -> bool {
     let normalized = normalize_code(value);
-    ((4..=6).contains(&normalized.len()) || normalized.len() == ROOM_CODE_LENGTH)
+    ((4..=6).contains(&normalized.len()) || normalized.len() == LEGACY_ROOM_CODE_LENGTH)
         && normalized.chars().all(|character| character.is_ascii_alphanumeric())
+}
+fn generate_room_code() -> String {
+    let mut rng = rand::thread_rng();
+    (0..ROOM_CODE_LENGTH).map(|_| ALPHABET[rng.gen_range(0..ALPHABET.len())] as char).collect()
+}
+fn room_idle_cutoff(current_time: i64) -> i64 {
+    current_time.saturating_sub(ROOM_IDLE_TIMEOUT.as_millis() as i64)
+}
+fn room_is_idle(updated_at: i64, current_time: i64) -> bool {
+    updated_at <= room_idle_cutoff(current_time)
 }
 fn token_hash(token: &str) -> String { BASE64.encode(Sha256::digest(token.as_bytes())) }
 
@@ -1038,12 +1052,16 @@ async fn find_party(state: &AppState, raw_code: &str) -> Result<Party, Response>
     if !valid_room_code(&party_code) {
         return Err(failure(StatusCode::BAD_REQUEST, "Room code must be 4 to 6 or 12 letters or numbers"));
     }
-    state.parties.find_one(doc! { "code": &party_code }).await
+    let party = state.parties.find_one(doc! { "code": &party_code }).await
         .map_err(|error| {
             tracing::error!(room_code = %party_code, %error, "Room lookup failed");
             failure(StatusCode::SERVICE_UNAVAILABLE, "Room data is temporarily unavailable")
         })?
-        .ok_or_else(|| failure(StatusCode::NOT_FOUND, "Room not found"))
+        .ok_or_else(|| failure(StatusCode::NOT_FOUND, "Room not found"))?;
+    if room_is_idle(party.updated_at, now()) {
+        return Err(failure(StatusCode::NOT_FOUND, "Room not found"));
+    }
+    Ok(party)
 }
 
 fn room_update_document(input: &UpdateInput, updated_at: i64) -> Result<Document, mongodb::bson::ser::Error> {
@@ -1086,26 +1104,8 @@ async fn create_room(State(state): State<AppState>, Json(input): Json<CreateInpu
         return failure(StatusCode::BAD_REQUEST, "Host name must be between 1 and 50 characters");
     }
 
-    if let Some(existing) = match state.parties.find_one(doc! { "host": &host }).await {
-        Ok(party) => party,
-        Err(_) => return failure(StatusCode::INTERNAL_SERVER_ERROR, "Database error occurred"),
-    } {
-        match state.party_auth.find_one(doc! { "code": &existing.code }).await {
-            Ok(Some(_)) => return failure(StatusCode::CONFLICT, "Close your active room before creating another one"),
-            Ok(None) => {
-                if state.parties.delete_one(doc! { "code": &existing.code }).await.is_err() {
-                    return failure(StatusCode::INTERNAL_SERVER_ERROR, "Unable to replace the expired room");
-                }
-            }
-            Err(_) => return failure(StatusCode::INTERNAL_SERVER_ERROR, "Database error occurred"),
-        }
-    }
-
     for _ in 0..10 {
-        let room_code: String = {
-            let mut rng = rand::thread_rng();
-            (0..ROOM_CODE_LENGTH).map(|_| ALPHABET[rng.gen_range(0..ALPHABET.len())] as char).collect()
-        };
+        let room_code = generate_room_code();
         if state.parties.find_one(doc! { "code": &room_code }).await.ok().flatten().is_some() { continue; }
         let party = Party {
             code: room_code.clone(),
@@ -1145,10 +1145,10 @@ async fn join_room(
     if name.is_empty() || name.len() > 50 {
         return failure(StatusCode::BAD_REQUEST, "Name must be between 1 and 50 characters");
     }
-    if state.parties.find_one(doc! { "host": &name }).await.ok().flatten().is_some() {
+    let party = match find_party(&state, &input.code).await { Ok(party) => party, Err(error) => return error };
+    if party.host.eq_ignore_ascii_case(&name) {
         return failure(StatusCode::CONFLICT, "The room host cannot join their own room as a guest");
     }
-    let party = match find_party(&state, &input.code).await { Ok(party) => party, Err(error) => return error };
     match state.parties.update_one(
         doc! { "code": &party.code },
         doc! { "$addToSet": { "members": &name }, "$set": { "updatedAt": now() } },
@@ -1204,6 +1204,18 @@ async fn read_room(
     }
     match find_party(&state, &room_code).await {
         Ok(party) => {
+            let current_time = now();
+            if current_time.saturating_sub(party.updated_at)
+                >= ROOM_ACTIVITY_REFRESH.as_millis() as i64
+            {
+                if let Err(error) = state.parties.update_one(
+                    doc! { "code": &party.code, "updatedAt": party.updated_at },
+                    doc! { "$set": { "updatedAt": current_time } },
+                ).await {
+                    tracing::error!(room_code = %party.code, %error, "Room activity could not be refreshed");
+                    return failure(StatusCode::SERVICE_UNAVAILABLE, "Room activity could not be refreshed");
+                }
+            }
             let authorized = match host_authorized(&state, &party.code, &headers).await {
                 Ok(authorized) => authorized,
                 Err(error) => return error,
@@ -1487,6 +1499,48 @@ async fn cleanup_expired_audio(audio_root: PathBuf) {
     }
 }
 
+async fn cleanup_idle_rooms(state: &AppState, io: &SocketIo) {
+    let cutoff = room_idle_cutoff(now());
+    let mut rooms = match state.parties.find(doc! { "updatedAt": { "$lte": cutoff } }).await {
+        Ok(rooms) => rooms,
+        Err(error) => {
+            tracing::error!(%error, "Idle room cleanup query failed");
+            return;
+        }
+    };
+
+    while let Some(result) = rooms.next().await {
+        let party = match result {
+            Ok(party) => party,
+            Err(error) => {
+                tracing::error!(%error, "Idle room cleanup could not read a room");
+                continue;
+            }
+        };
+        match state.parties.delete_one(doc! {
+            "code": &party.code,
+            "updatedAt": { "$lte": cutoff },
+        }).await {
+            Ok(result) if result.deleted_count == 1 => {
+                if let Err(error) = state.party_auth.delete_one(doc! { "code": &party.code }).await {
+                    tracing::error!(room_code = %party.code, %error, "Idle room authorization cleanup failed");
+                }
+                if let Err(error) = io
+                    .to(room_socket_channel(&party.code))
+                    .emit("room-closed", &party.code)
+                {
+                    tracing::warn!(room_code = %party.code, %error, "Could not notify listeners that the idle room closed");
+                }
+                info!(room_code = %party.code, "Closed room after five minutes without activity");
+            }
+            Ok(_) => {}
+            Err(error) => {
+                tracing::error!(room_code = %party.code, %error, "Idle room cleanup failed");
+            }
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt().with_env_filter("wavelength_backend=info").init();
@@ -1525,6 +1579,10 @@ async fn main() {
         room_access_sessions: Arc::new(Mutex::new(HashMap::new())),
         shared_audio_access: Arc::new(Mutex::new(HashMap::new())),
     };
+    state.parties.update_many(
+        doc! { "updatedAt": { "$exists": false } },
+        doc! { "$set": { "updatedAt": now() } },
+    ).await.expect("initialize activity timestamps for existing rooms");
     let (socket_layer, io) = SocketIo::builder().build_layer();
     let parties = state.parties.clone();
     let socket_state = state.clone();
@@ -1655,6 +1713,15 @@ async fn main() {
             cleanup_expired_audio(cleanup_root.clone()).await;
         }
     });
+    let cleanup_state = state.clone();
+    let cleanup_io = io.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(ROOM_CLEANUP_INTERVAL);
+        loop {
+            interval.tick().await;
+            cleanup_idle_rooms(&cleanup_state, &cleanup_io).await;
+        }
+    });
     let api = Router::new()
         .route("/parties", post(create_room))
         .route("/parties/join", post(join_room))
@@ -1705,12 +1772,13 @@ async fn main() {
 mod tests {
     use super::{
         allowed_origins, client_ip, frontend_origin, hash_room_server_passcode,
-        is_shared_audio_stream_path, normalize_code, parse_audio_id, parse_byte_range,
-        public_api_request, room_command_allowed, room_update_document, room_update_filter,
+        generate_room_code, is_shared_audio_stream_path, normalize_code, parse_audio_id, parse_byte_range,
+        public_api_request, room_command_allowed, room_idle_cutoff, room_is_idle,
+        room_update_document, room_update_filter,
         shared_audio_grant_matches, spotify_track_uris, token_hash, token_matches,
         too_many_requests, valid_room_code, verify_room_server_passcode, IpRateLimiter, Party,
-        Permissions, RoomCommand, SharedAudioGrant, UpdateInput, ROOM_CODE_LENGTH,
-        SHARED_AUDIO_TTL,
+        Permissions, RoomCommand, SharedAudioGrant, UpdateInput, LEGACY_ROOM_CODE_LENGTH,
+        ROOM_IDLE_TIMEOUT, SHARED_AUDIO_TTL,
     };
     use axum::http::{HeaderMap, HeaderValue, Method};
     use std::{collections::HashSet, net::{IpAddr, SocketAddr}};
@@ -1764,10 +1832,30 @@ mod tests {
         assert_eq!(normalize_code(" ab12 "), "AB12");
         assert!(valid_room_code("AB12"));
         assert!(valid_room_code("ABC123"));
-        assert!(valid_room_code(&"A".repeat(ROOM_CODE_LENGTH)));
+        assert!(valid_room_code(&"A".repeat(LEGACY_ROOM_CODE_LENGTH)));
         assert!(!valid_room_code("ABC"));
         assert!(!valid_room_code("ABCDEFG"));
-        assert!(!valid_room_code(&"A".repeat(ROOM_CODE_LENGTH + 1)));
+        assert!(!valid_room_code(&"A".repeat(LEGACY_ROOM_CODE_LENGTH + 1)));
+    }
+
+    #[test]
+    fn new_room_codes_are_four_alphanumeric_characters() {
+        let code = generate_room_code();
+        assert_eq!(code.len(), 4);
+        assert!(code.chars().all(|character| character.is_ascii_alphanumeric()));
+    }
+
+    #[test]
+    fn rooms_expire_at_five_minutes_without_activity() {
+        let current_time = 1_000_000;
+        let idle_timeout = ROOM_IDLE_TIMEOUT.as_millis() as i64;
+
+        assert_eq!(idle_timeout, 5 * 60 * 1000);
+        assert_eq!(room_idle_cutoff(current_time), current_time - idle_timeout);
+        assert!(!room_is_idle(current_time - idle_timeout + 1, current_time));
+        assert!(room_is_idle(current_time - idle_timeout, current_time));
+        assert!(room_is_idle(current_time - idle_timeout - 1, current_time));
+        assert!(!room_is_idle(current_time + 1, current_time));
     }
 
     #[test]
