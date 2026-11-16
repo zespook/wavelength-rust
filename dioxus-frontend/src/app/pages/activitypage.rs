@@ -23,7 +23,7 @@ pub(super) fn ActivityPage(data: std::rc::Rc<PageData>) -> Element {
                     p { class: "download-logs-error", role: "alert", "{(app_state.activity_error)()}" }
                 } else if (app_state.activity_logs)().is_empty() {
                     p { class: "download-log-empty",
-                        if (app_state.activity_loading)() { "Loading activity…" } else { "No download activity recorded." }
+                        if (app_state.activity_loading)() { "Loading activity…" } else { "No download activity recorded" }
                     }
                 } else {
                     div { class: "download-log-list", role: "table", aria_label: "Download activity",
@@ -47,7 +47,7 @@ pub(super) fn ActivityPage(data: std::rc::Rc<PageData>) -> Element {
                     }
                 }
             } else if (app_state.notification_logs)().is_empty() {
-                p { class: "download-log-empty", "No popup notifications recorded." }
+                p { class: "download-log-empty", "No popup notifications recorded" }
             } else {
                 div { class: "notification-log-list", role: "list", aria_label: "Popup notifications",
                     for (index, entry) in (app_state.notification_logs)().iter().cloned().enumerate() {

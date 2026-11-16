@@ -53,7 +53,7 @@ pub(super) fn CustomizationPage(data: std::rc::Rc<PageData>) -> Element {
                     div { class: "customization-background-control",
                         div { class: "settings-row-copy",
                             strong { "Background color" }
-                            small { "Choose a custom page background." }
+                            small { "Choose a custom page background" }
                         }
                         div { class: "background-color-actions",
                             div { class: "accent-current",
@@ -102,7 +102,7 @@ pub(super) fn CustomizationPage(data: std::rc::Rc<PageData>) -> Element {
                                 }
                                 p { class: "eyebrow", "Customization" }
                                 h2 { id: "background-picker-heading", "Background color" }
-                                p { "Choose a color with the picker or enter a six-digit hex value." }
+                                p { "Choose a color with the picker or enter a six-digit hex value" }
                                 label { class: "background-picker-control",
                                     span { "Color" }
                                     input {
@@ -159,7 +159,7 @@ pub(super) fn CustomizationPage(data: std::rc::Rc<PageData>) -> Element {
                     div { class: "settings-row",
                         div { class: "settings-row-copy",
                             strong { "Accent color" }
-                            small { "Choose a preset or enter a hex color." }
+                            small { "Choose a preset or enter a hex color" }
                         }
                         div { class: "accent-actions",
                             div { class: "accent-current",

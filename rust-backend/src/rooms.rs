@@ -585,6 +585,27 @@ fn spotify_cookie(headers: &HeaderMap) -> Option<String> {
         .find_map(|part| part.trim().strip_prefix("wavelength_spotify=").map(str::to_string))
 }
 
+fn allowed_origins(frontend_url: Option<&str>) -> Vec<HeaderValue> {
+    let mut origins = vec![
+        HeaderValue::from_static("http://dioxus.index.html"),
+        HeaderValue::from_static("dioxus://index.html"),
+        HeaderValue::from_static("http://localhost:5173"),
+        HeaderValue::from_static("http://127.0.0.1:5173"),
+        HeaderValue::from_static("http://localhost:8080"),
+        HeaderValue::from_static("http://127.0.0.1:8080"),
+    ];
+    if let Some(frontend_url) = frontend_url {
+        if let Ok(url) = reqwest::Url::parse(frontend_url) {
+            if let Ok(origin) = HeaderValue::from_str(&url.origin().ascii_serialization()) {
+                origins.push(origin);
+            }
+        }
+    }
+    origins.sort();
+    origins.dedup();
+    origins
+}
+
 async fn spotify_login(State(state): State<AppState>, Query(query): Query<SpotifyLoginQuery>) -> Response {
     let client_id = env::var("SPOTIFY_CLIENT_ID").unwrap_or_default();
     let client_secret = env::var("SPOTIFY_CLIENT_SECRET").unwrap_or_default();
@@ -1624,17 +1645,7 @@ async fn main() {
             });
         }
     });
-    let mut origins = vec![
-        HeaderValue::from_static("http://dioxus.index.html"),
-        HeaderValue::from_static("dioxus://index.html"),
-        HeaderValue::from_static("http://localhost:5173"),
-        HeaderValue::from_static("http://127.0.0.1:5173"),
-    ];
-    if let Ok(frontend_url) = env::var("FRONTEND_URL") {
-        if let Ok(url) = reqwest::Url::parse(&frontend_url) {
-            if let Ok(origin) = HeaderValue::from_str(&url.origin().ascii_serialization()) { origins.push(origin); }
-        }
-    }
+    let origins = allowed_origins(env::var("FRONTEND_URL").ok().as_deref());
     cleanup_expired_audio(state.audio_root.clone()).await;
     let cleanup_root = state.audio_root.clone();
     tokio::spawn(async move {
@@ -1693,12 +1704,13 @@ async fn main() {
 #[cfg(test)]
 mod tests {
     use super::{
-        frontend_origin, is_shared_audio_stream_path, normalize_code, parse_audio_id, parse_byte_range,
+        allowed_origins, client_ip, frontend_origin, hash_room_server_passcode,
+        is_shared_audio_stream_path, normalize_code, parse_audio_id, parse_byte_range,
         public_api_request, room_command_allowed, room_update_document, room_update_filter,
-        client_ip, hash_room_server_passcode, shared_audio_grant_matches, spotify_track_uris,
-        token_hash, token_matches, too_many_requests, valid_room_code, verify_room_server_passcode,
-        IpRateLimiter, Party, Permissions, RoomCommand, SharedAudioGrant, UpdateInput,
-        ROOM_CODE_LENGTH, SHARED_AUDIO_TTL,
+        shared_audio_grant_matches, spotify_track_uris, token_hash, token_matches,
+        too_many_requests, valid_room_code, verify_room_server_passcode, IpRateLimiter, Party,
+        Permissions, RoomCommand, SharedAudioGrant, UpdateInput, ROOM_CODE_LENGTH,
+        SHARED_AUDIO_TTL,
     };
     use axum::http::{HeaderMap, HeaderValue, Method};
     use std::{collections::HashSet, net::{IpAddr, SocketAddr}};
@@ -1717,6 +1729,23 @@ mod tests {
             frontend_origin(Some("http://dioxus.evil")),
             "http://dioxus.evil"
         );
+    }
+
+    #[test]
+    fn dioxus_web_dev_origins_are_allowed_for_cors() {
+        let origins = allowed_origins(None);
+        for origin in ["http://localhost:8080", "http://127.0.0.1:8080"] {
+            assert!(
+                origins.contains(&HeaderValue::from_static(origin)),
+                "missing allowed origin {origin}"
+            );
+        }
+    }
+
+    #[test]
+    fn configured_frontend_origin_is_allowed_for_cors() {
+        let origins = allowed_origins(Some("https://music.example.com/app"));
+        assert!(origins.contains(&HeaderValue::from_static("https://music.example.com")));
     }
 
     #[test]

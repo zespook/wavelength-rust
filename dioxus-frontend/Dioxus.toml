@@ -2,14 +2,14 @@
 name = "wavelength"
 default_platform = "web"
 out_dir = "../dist-dioxus"
-asset_dir = "public"
+asset_dir = "assets"
 
 [web.app]
 title = "Wavelength"
 
 [web.watcher]
 index_on_404 = true
-watch_path = ["src", "public"]
+watch_path = ["src", "assets"]
 
 [bundle]
 identifier = "com.wavelength.desktop"
@@ -22,4 +22,8 @@ icon = ["icons/icon.png", "icons/icon.ico", "icons/icon.icns"]
 webview_install_mode = { DownloadBootstrapper = { silent = true } }
 
 [bundle.windows.nsis]
+installer_icon = "icons/icon.ico"
 installer_hooks = "../scripts/install-services.nsi"
+
+[bundle.deb]
+post_install_script = "../scripts/linux-pkg-postinstall"

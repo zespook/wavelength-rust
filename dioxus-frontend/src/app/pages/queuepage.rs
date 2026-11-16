@@ -14,11 +14,13 @@ pub(super) fn QueuePage(data: std::rc::Rc<PageData>) -> Element {
     match Page::Queue {
         Page::Queue => rsx! {
             header { class: "library-page-heading", h1 { "Queue" }
-                button {
-                    class: "text-button",
-                    disabled: !can_manage_queue,
-                    onclick: move |_| clear_queue(app_state.queue, app_state.notice),
-                    "Clear queue"
+                if !(app_state.queue)().is_empty() {
+                    button {
+                        class: "text-button",
+                        disabled: !can_manage_queue,
+                        onclick: move |_| clear_queue(app_state.queue, app_state.notice),
+                        "Clear queue"
+                    }
                 }
             }
             if !(app_state.queue_download_error)().is_empty() {
@@ -26,7 +28,7 @@ pub(super) fn QueuePage(data: std::rc::Rc<PageData>) -> Element {
                     "Download status unavailable: {(app_state.queue_download_error)()}"
                 }
             }
-            if (app_state.queue)().is_empty() { p { class: "library-empty", "Your queue is empty." } }
+            if (app_state.queue)().is_empty() { p { class: "library-empty", "Your queue is empty" } }
             div { class: "queue-page-list",
                 for (index, track) in (app_state.queue)().iter().cloned().enumerate() {
                     {

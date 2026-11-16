@@ -2,12 +2,16 @@
 set -euo pipefail
 
 TARGET_VOLUME="${2:-/}"
-APP_BUNDLE="$TARGET_VOLUME/Applications/Wavelength.app"
-APP_EXECUTABLE="$APP_BUNDLE/Contents/MacOS/wavelength"
+APP_EXECUTABLE="$TARGET_VOLUME/Applications/Wavelength.app/Contents/MacOS/wavelength"
 
 if [[ ! -x "$APP_EXECUTABLE" ]]; then
 	echo "The installed Wavelength application executable was not found." >&2
 	exit 1
 fi
 
-"$APP_EXECUTABLE" --install-services
+CONSOLE_USER="$(stat -f %Su /dev/console)"
+if [[ "$CONSOLE_USER" == "root" || "$CONSOLE_USER" == "loginwindow" ]]; then
+	exit 0
+fi
+
+/usr/bin/sudo -u "$CONSOLE_USER" "$APP_EXECUTABLE" --install-services

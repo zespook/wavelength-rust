@@ -11,6 +11,15 @@ pub(super) fn SettingsPage(data: std::rc::Rc<PageData>) -> Element {
     let font_scale = (app_state.font_scale)();
     let font_scale_percent = (font_scale * 100.0).round() as u32;
     let download_folder_name = (app_state.download_folder_name)();
+    let app_version = format!(
+        "Version {} · {}",
+        env!("CARGO_PKG_VERSION"),
+        if (app_state.window_controls_available)() {
+            "Desktop app"
+        } else {
+            "Web app"
+        }
+    );
 
     match Page::Settings {
         Page::Settings => rsx! {
@@ -70,7 +79,7 @@ pub(super) fn SettingsPage(data: std::rc::Rc<PageData>) -> Element {
                                     if let Some(profile) = (app_state.spotify_profile)() {
                                         "Connected as {profile.display_name.as_deref().filter(|name| !name.is_empty()).unwrap_or(&profile.id)}"
                                     } else {
-                                        "Connect your account to search Spotify directly."
+                                        "Connect your account to search Spotify directly"
                                     }
                                 }
                             }
@@ -113,7 +122,7 @@ pub(super) fn SettingsPage(data: std::rc::Rc<PageData>) -> Element {
                             div { class: "settings-row settings-inline-form-row",
                                 div { class: "settings-row-copy",
                                     strong { "Create a Spotify playlist" }
-                                    small { "Start a new playlist in your connected account." }
+                                    small { "Start a new playlist in your connected account" }
                                 }
                                 form { class: "create-playlist-form", onsubmit: move |event| {
                                     event.prevent_default();
@@ -139,7 +148,7 @@ pub(super) fn SettingsPage(data: std::rc::Rc<PageData>) -> Element {
                         div { class: "settings-row",
                             div { class: "settings-row-copy",
                                 strong { "Local folders" }
-                                small { "Manage folders saved on this device." }
+                                small { "Manage folders saved on this device" }
                             }
                             button { class: "outline-button compact-action", onclick: move |_| {
                                 app_state.folder_manager_open.set(true);
@@ -154,9 +163,9 @@ pub(super) fn SettingsPage(data: std::rc::Rc<PageData>) -> Element {
                         div { class: "settings-row",
                             div { class: "settings-row-copy",
                                 strong { "Download folder" }
-                                small { "Choose where downloaded tracks are saved." }
+                                small { "Choose where downloaded tracks are saved" }
                             }
-                            div { class: "settings-row-actions",
+                            div { class: "settings-row-actions download-folder-actions",
                                 if download_folder_name.is_empty() {
                                     span { class: "settings-nav-summary", "Browser default" }
                                 } else {
@@ -166,41 +175,43 @@ pub(super) fn SettingsPage(data: std::rc::Rc<PageData>) -> Element {
                                         "{download_folder_name}"
                                     }
                                 }
-                                button {
-                                    class: "outline-button compact-action",
-                                    onclick: move |_| {
-                                        let mut folder_name = app_state.download_folder_name;
-                                        let mut notice = app_state.notice;
-                                        spawn(async move {
-                                            match browser::choose_download_folder().await {
-                                                Ok(Some(name)) => {
-                                                    folder_name.set(name);
-                                                    notice.set(String::new());
-                                                }
-                                                Ok(None) => {}
-                                                Err(error) => notice.set(error),
-                                            }
-                                        });
-                                    },
-                                    if download_folder_name.is_empty() { "Choose folder" } else { "Change" }
-                                }
-                                if !download_folder_name.is_empty() {
+                                div { class: "download-folder-controls",
                                     button {
-                                        class: "text-button",
+                                        class: "outline-button compact-action",
                                         onclick: move |_| {
                                             let mut folder_name = app_state.download_folder_name;
                                             let mut notice = app_state.notice;
                                             spawn(async move {
-                                                match browser::clear_download_folder().await {
-                                                    Ok(()) => {
-                                                        folder_name.set(String::new());
+                                                match browser::choose_download_folder().await {
+                                                    Ok(Some(name)) => {
+                                                        folder_name.set(name);
                                                         notice.set(String::new());
                                                     }
+                                                    Ok(None) => {}
                                                     Err(error) => notice.set(error),
                                                 }
                                             });
                                         },
-                                        "Use browser default"
+                                        if download_folder_name.is_empty() { "Choose folder" } else { "Change" }
+                                    }
+                                    if !download_folder_name.is_empty() {
+                                        button {
+                                            class: "text-button",
+                                            onclick: move |_| {
+                                                let mut folder_name = app_state.download_folder_name;
+                                                let mut notice = app_state.notice;
+                                                spawn(async move {
+                                                    match browser::clear_download_folder().await {
+                                                        Ok(()) => {
+                                                            folder_name.set(String::new());
+                                                            notice.set(String::new());
+                                                        }
+                                                        Err(error) => notice.set(error),
+                                                    }
+                                                });
+                                            },
+                                            "Use browser default"
+                                        }
                                     }
                                 }
                             }
@@ -213,21 +224,21 @@ pub(super) fn SettingsPage(data: std::rc::Rc<PageData>) -> Element {
                         div { class: "settings-row",
                             div { class: "settings-row-copy",
                                 strong { "Equalizer" }
-                                small { "Shape the sound across ten frequency bands." }
+                                small { "Shape the sound across ten frequency bands" }
                             }
                             button { class: "outline-button compact-action", onclick: move |_| app_state.page.set(Page::Equalizer), "Modify" }
                         }
                         div { class: "settings-row",
                             div { class: "settings-row-copy",
                                 strong { "Appearance" }
-                                small { "Set a theme and accent color." }
+                                small { "Set a theme and accent color" }
                             }
                             button { class: "outline-button compact-action", onclick: move |_| app_state.page.set(Page::Customization), "Customize" }
                         }
                         div { class: "settings-row",
                             div { class: "settings-row-copy",
                                 strong { "Text size" }
-                                small { "Adjust text size without changing the layout scale." }
+                                small { "Adjust text size without changing the layout scale" }
                             }
                             div { class: "settings-row-actions text-scale-controls", role: "group", aria_label: "Text size",
                                 button {
@@ -252,20 +263,20 @@ pub(super) fn SettingsPage(data: std::rc::Rc<PageData>) -> Element {
                         div { class: "settings-row",
                             div { class: "settings-row-copy",
                                 strong { "Interface zoom" }
-                                small { "Use Ctrl/Command + plus or minus to zoom; Ctrl/Command + 0 resets." }
+                                small { "Use Ctrl/Command + plus or minus to zoom; Ctrl/Command + 0 resets" }
                             }
                             span { class: "settings-nav-summary", "70%-150%" }
                         }
                     }
                 }
-                section { class: "settings-section settings-card settings-card-wide", aria_label: "Self-hosted room server",
+                section { class: "settings-section settings-card", aria_label: "Self-hosted room server",
                     header { class: "settings-section-heading", h2 { "Self-hosted room server" } }
                     div { class: "settings-list",
                         div { class: "settings-row room-server-settings-row",
                             div { class: "room-server-heading",
                                 div { class: "settings-row-copy",
                                     strong { "Server address" }
-                                    small { "Connect to the Rust room server used for shared listening." }
+                                    small { "Connect to the Rust room server used for shared listening" }
                                 }
                                 div { class: "room-server-status",
                                     small { class: if !(app_state.room_access)().is_empty() { "connected" } else { "room-server-state" },
@@ -284,7 +295,7 @@ pub(super) fn SettingsPage(data: std::rc::Rc<PageData>) -> Element {
                                             class: "text-button room-server-disconnect",
                                             aria_label: "Disconnect from room server",
                                             disabled: (app_state.room_connecting)() || !(app_state.active_room_code)().is_empty(),
-                                            onclick: move |_| disconnect_room(app_state.room_access, app_state.room_passcode, app_state.active_room_code, app_state.notice),
+                                            onclick: move |_| disconnect_room(app_state.room_access, app_state.active_room_code, app_state.notice),
                                             "Disconnect"
                                         }
                                     }
@@ -308,7 +319,14 @@ pub(super) fn SettingsPage(data: std::rc::Rc<PageData>) -> Element {
                                         autocomplete: "current-password",
                                         maxlength: "128",
                                         value: "{(app_state.room_passcode)()}",
-                                        oninput: move |event| app_state.room_passcode.set(event.value())
+                                        oninput: move |event| app_state.room_passcode.set(event.value()),
+                                        onchange: move |event| {
+                                            let value = event.value();
+                                            let value = if value.is_empty() { None } else { Some(value.as_str()) };
+                                            if let Err(error) = browser::set_room_server_passcode(value) {
+                                                app_state.notice.set(error);
+                                            }
+                                        }
                                     }
                                     button {
                                         class: "solid-button compact-action",
@@ -318,7 +336,7 @@ pub(super) fn SettingsPage(data: std::rc::Rc<PageData>) -> Element {
                                     }
                                 }
                             }
-                            small { class: "room-server-help", "The passcode is only used to request a session and is not stored." }
+                            small { class: "room-server-help", "Saved locally so you can reconnect later" }
                         }
                     }
                 }
@@ -328,7 +346,7 @@ pub(super) fn SettingsPage(data: std::rc::Rc<PageData>) -> Element {
                         div { class: "settings-row",
                             div { class: "settings-row-copy",
                                 strong { "Logs" }
-                                small { "Review download and notification activity." }
+                                small { "Review download and notification activity" }
                             }
                             button { class: "outline-button compact-action", onclick: move |_| app_state.page.set(Page::Activity), "View" }
                         }
@@ -340,7 +358,7 @@ pub(super) fn SettingsPage(data: std::rc::Rc<PageData>) -> Element {
                         div { class: "settings-row",
                             div { class: "settings-row-copy",
                                 strong { "Wavelength" }
-                                small { if (app_state.window_controls_available)() { "Desktop app" } else { "Web app" } }
+                                small { "{app_version}" }
                             }
                         }
                         div { class: "settings-row",
@@ -348,9 +366,9 @@ pub(super) fn SettingsPage(data: std::rc::Rc<PageData>) -> Element {
                                 strong { "Updates" }
                                 small {
                                     if (app_state.window_controls_available)() {
-                                        "Check for and install signed desktop updates."
+                                        "Check for and install signed desktop updates"
                                     } else {
-                                        "Automatic updates are available in the desktop app."
+                                        "Automatic updates are available in the desktop app"
                                     }
                                 }
                             }

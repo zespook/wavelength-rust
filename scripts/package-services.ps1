@@ -70,6 +70,4 @@ if (-not (Test-Path (Join-Path $RuntimeResourceDir 'node.exe'))) {
     throw 'The bundled Node.js runtime is missing.'
 }
 
-Compress-Archive -Path (Join-Path $ResourceDir '*') -DestinationPath (Join-Path $BundleResourceDir 'services.zip') -Force
-
-Write-Host 'Combined audio/Qobuz service and Node.js runtime are ready for Dioxus bundling.' -ForegroundColor Green
+Write-Host 'Combined audio/Qobuz service and Node.js runtime are ready for desktop development.' -ForegroundColor Green

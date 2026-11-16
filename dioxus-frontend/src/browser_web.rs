@@ -31,8 +31,6 @@ extern "C" {
     async fn check_for_updates_js() -> Result<JsValue, JsValue>;
     #[wasm_bindgen(catch, js_name = installUpdate)]
     async fn install_update_js(version: &str) -> Result<bool, JsValue>;
-    #[wasm_bindgen(catch, js_name = installWindowDragging)]
-    fn install_window_dragging_js() -> Result<bool, JsValue>;
     #[wasm_bindgen(catch, js_name = effectiveTheme)]
     fn effective_theme_js(theme: &str) -> Result<String, JsValue>;
     #[wasm_bindgen(catch, js_name = windowAction)]
@@ -63,6 +61,8 @@ extern "C" {
     async fn search_audio_js(query: &str, source: &str) -> Result<JsValue, JsValue>;
     #[wasm_bindgen(catch, js_name = playAudio)]
     fn play_audio_js() -> Result<bool, JsValue>;
+    #[wasm_bindgen(catch, js_name = playAudioSource)]
+    async fn play_audio_source_js(source: &str) -> Result<bool, JsValue>;
     #[wasm_bindgen(catch, js_name = pauseAudio)]
     fn pause_audio_js() -> Result<bool, JsValue>;
     #[wasm_bindgen(catch, js_name = seekAudio)]
@@ -185,6 +185,18 @@ pub fn remove_local(key: &str) -> Result<(), String> {
     remove_local_js(key).map(|_| ()).map_err(error)
 }
 
+pub fn room_server_passcode() -> Result<Option<String>, String> {
+    load("wavelength-room-passcode")
+}
+
+pub fn set_room_server_passcode(passcode: Option<&str>) -> Result<(), String> {
+    match passcode.filter(|passcode| !passcode.is_empty()) {
+        Some(passcode) if passcode.len() <= 128 => save("wavelength-room-passcode", &passcode),
+        Some(_) => Err("The room server passcode is invalid.".to_string()),
+        None => remove_local("wavelength-room-passcode"),
+    }
+}
+
 pub fn install_hover_marquee() -> Result<(), String> {
     install_hover_marquee_js().map(|_| ()).map_err(error)
 }
@@ -222,15 +234,10 @@ pub async fn check_for_updates() -> Result<Option<UpdateInfo>, String> {
 }
 
 pub async fn install_update(version: &str) -> Result<(), String> {
-    install_update_js(version)
-        .await
-        .map(|_| ())
-        .map_err(error)
+    install_update_js(version).await.map(|_| ()).map_err(error)
 }
 
-pub fn install_window_dragging() -> Result<(), String> {
-    install_window_dragging_js().map(|_| ()).map_err(error)
-}
+pub fn drag_window() {}
 
 pub fn effective_theme(theme: &str) -> Result<String, String> {
     effective_theme_js(theme).map_err(error)
@@ -324,6 +331,12 @@ pub async fn search(query: &str, source: &str) -> Result<Vec<Track>, String> {
 
 pub fn play() -> Result<(), String> {
     play_audio_js().map(|_| ()).map_err(error)
+}
+pub async fn play_source(source: &str) -> Result<(), String> {
+    play_audio_source_js(source)
+        .await
+        .map(|_| ())
+        .map_err(error)
 }
 pub fn pause() -> Result<(), String> {
     pause_audio_js().map(|_| ()).map_err(error)
@@ -494,7 +507,10 @@ pub fn disconnect_room_socket() -> Result<(), String> {
     disconnect_room_socket_js().map(|_| ()).map_err(error)
 }
 
-pub async fn emit_room_command(action: &str, details: &serde_json::Value) -> Result<String, String> {
+pub async fn emit_room_command(
+    action: &str,
+    details: &serde_json::Value,
+) -> Result<String, String> {
     let value = serde_wasm_bindgen::to_value(details).map_err(|error| error.to_string())?;
     emit_room_command_js(action, value)
         .map_err(error)?
@@ -502,9 +518,7 @@ pub async fn emit_room_command(action: &str, details: &serde_json::Value) -> Res
         .ok_or_else(|| "Room command returned an invalid status.".to_string())
 }
 
-pub async fn emit_room_playback_control(
-    control: &serde_json::Value,
-) -> Result<String, String> {
+pub async fn emit_room_playback_control(control: &serde_json::Value) -> Result<String, String> {
     let value = serde_wasm_bindgen::to_value(control).map_err(|error| error.to_string())?;
     emit_room_playback_control_js(value)
         .map_err(error)?
@@ -512,9 +526,7 @@ pub async fn emit_room_playback_control(
         .ok_or_else(|| "Room playback control returned an invalid status.".to_string())
 }
 
-pub async fn emit_room_playback_progress(
-    progress: &serde_json::Value,
-) -> Result<String, String> {
+pub async fn emit_room_playback_progress(progress: &serde_json::Value) -> Result<String, String> {
     let value = serde_wasm_bindgen::to_value(progress).map_err(|error| error.to_string())?;
     emit_room_playback_progress_js(value)
         .map_err(error)?

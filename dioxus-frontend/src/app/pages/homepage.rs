@@ -15,15 +15,14 @@ pub(super) fn HomePage(data: std::rc::Rc<PageData>) -> Element {
     let home_albums = data.home_albums.clone();
     let artist_stats = data.artist_stats.clone();
     let song_stats = data.song_stats.clone();
-    let show_home_demo = data.show_home_demo.clone();
     match Page::Home {
         Page::Home => rsx! {
             section { class: "home-hero",
                 div { class: "home-hero-copy",
                     section { class: "home-greeting",
                         p { class: "eyebrow", "Your library" }
-                        h1 { "Your music, within reach." }
-                        p { "Search across music services or bring your own collection together." }
+                        h1 { "Your music, within reach" }
+                        p { "Search across music services or bring your own collection together" }
                     }
                     div { class: "home-actions",
                         button { class: "solid-button", onclick: move |_| app_state.page.set(Page::Search),
@@ -73,12 +72,12 @@ pub(super) fn HomePage(data: std::rc::Rc<PageData>) -> Element {
                             p { "{track.artist}" }
                         } else {
                             h2 { "Nothing added yet" }
-                            p { "Add a music folder to browse albums and tracks here." }
+                            p { "Add a music folder to browse albums and tracks here" }
                         }
                     }
                     if home_featured_track.is_some() {
                         button { class: "home-preview-link", onclick: move |_| app_state.page.set(Page::Library),
-                            "Browse local library"
+                            "Browse local files"
                             Icon { name: "arrow-right" }
                         }
                     }
@@ -87,30 +86,15 @@ pub(super) fn HomePage(data: std::rc::Rc<PageData>) -> Element {
             section { class: "home-recently-played",
                 div { class: "section-head",
                     div { h2 { "Recently played" } }
-                    if show_home_demo {
-                        span { class: "home-demo-badge", "Sample data" }
-                    }
                 }
-                if show_home_demo {
-                    div { class: "home-demo-track-list", role: "list",
-                        for (index, (title, artist, played_at)) in HOME_DEMO_RECENT.iter().enumerate() {
-                            div { class: "home-demo-track", key: "{index}", role: "listitem",
-                                span { class: "home-demo-art", Icon { name: "disc" } }
-                                div { class: "home-demo-track-copy",
-                                    strong { "{title}" }
-                                    small { "{artist} · {played_at}" }
-                                }
-                            }
-                        }
-                    }
-                } else if !(app_state.history)().is_empty() {
+                if !(app_state.history)().is_empty() {
                     TrackList {
                         tracks: (app_state.history)().into_iter().take(6).collect(),
                         current: app_state.current, audio_src: app_state.audio_src, playing: app_state.playing, queue: app_state.queue, history: app_state.history, favorites: app_state.favorites, notice: app_state.notice, context_track: app_state.context_track,
                         context_menu_only: true
                     }
                 } else {
-                    p { class: "settings-empty", "Recent plays will appear here." }
+                    p { class: "settings-empty", "Recent plays will appear here" }
                 }
             }
             if !home_playlists.is_empty() || !home_albums.is_empty() {
@@ -184,8 +168,8 @@ pub(super) fn HomePage(data: std::rc::Rc<PageData>) -> Element {
                         div { h2 { "Recently added" } }
                         button {
                             class: "icon-button recent-added-library-link",
-                            aria_label: "Open local library",
-                            title: "Open local library",
+                            aria_label: "Open local files",
+                            title: "Open local files",
                             onclick: move |_| app_state.page.set(Page::Library),
                             Icon { name: "arrow-right" }
                         }
@@ -239,10 +223,7 @@ pub(super) fn HomePage(data: std::rc::Rc<PageData>) -> Element {
             section { class: "home-stats",
                     div { class: "section-head home-stats-heading",
                         div { class: "home-stats-title",
-                            h2 { "Listening Stats" }
-                            if show_home_demo {
-                                span { class: "home-demo-badge", "Sample data" }
-                            }
+                            h2 { "Listening stats" }
                         }
                         label { class: "stats-period-label",
                             CustomSelect {
@@ -264,16 +245,8 @@ pub(super) fn HomePage(data: std::rc::Rc<PageData>) -> Element {
                     div { class: "stats-grid",
                         section { class: "stat-panel",
                             h3 { "Top artists" }
-                            if show_home_demo {
-                                for (index, (artist, count)) in HOME_DEMO_ARTISTS.iter().enumerate() {
-                                    div { class: "stat-row", key: "{artist}",
-                                        span { "{index + 1:02}" }
-                                        strong { "{artist}" }
-                                        b { "{count}" }
-                                    }
-                                }
-                            } else if artist_stats.is_empty() {
-                                p { class: "settings-empty", "Play music to build your stats." }
+                            if artist_stats.is_empty() {
+                                p { class: "settings-empty", "Play music to build your stats" }
                             } else {
                                 for (index, (artist, count)) in artist_stats.iter().enumerate() {
                                     div { class: "stat-row", key: "{artist}",
@@ -286,16 +259,8 @@ pub(super) fn HomePage(data: std::rc::Rc<PageData>) -> Element {
                         }
                         section { class: "stat-panel",
                             h3 { "Top tracks" }
-                            if show_home_demo {
-                                for (index, (title, count)) in HOME_DEMO_TRACKS.iter().enumerate() {
-                                    div { class: "stat-row", key: "{title}",
-                                        span { "{index + 1:02}" }
-                                        strong { "{title}" }
-                                        b { "{count}" }
-                                    }
-                                }
-                            } else if song_stats.is_empty() {
-                                p { class: "settings-empty", "Your most-played tracks will appear here." }
+                            if song_stats.is_empty() {
+                                p { class: "settings-empty", "Your most-played tracks will appear here" }
                             } else {
                                 for (index, (title, _, count)) in song_stats.iter().enumerate() {
                                     div { class: "stat-row", key: "{title}-{index}",

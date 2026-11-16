@@ -43,7 +43,6 @@ pub(super) struct PageData {
     playlist_detail: Option<Playlist>,
     album_detail_name: Option<String>,
     album_detail_tracks: Vec<Track>,
-    visible_local_playlist_count: usize,
     favorite_playlist_id: String,
     now_playing_previous_source: Vec<Track>,
     now_playing_next_source: Vec<Track>,
@@ -54,7 +53,6 @@ pub(super) struct PageData {
     home_albums: Vec<(String, Vec<Track>)>,
     artist_stats: Vec<(String, u64)>,
     song_stats: Vec<(String, String, u64)>,
-    show_home_demo: bool,
     background_color_value: String,
     background_picker_color: String,
     library_folder_rows: Vec<LocalFolderRow>,
@@ -235,15 +233,6 @@ pub(super) fn PageContent() -> Element {
                 .map(|(_, tracks)| tracks)
         })
         .unwrap_or_default();
-    let visible_local_playlist_count = playlists()
-        .iter()
-        .filter(|item| playlist_matches(&playlist_query(), &item.name))
-        .count()
-        + if playlist_matches(&playlist_query(), "Favorite Songs") {
-            1
-        } else {
-            0
-        };
     let favorite_playlist_id = "favorite-songs".to_string();
     let page_tracks = match page() {
         Page::Search => results(),
@@ -299,7 +288,6 @@ pub(super) fn PageContent() -> Element {
     let home_albums = group_local_tracks(local_tracks(), "album");
     let (artist_stats, song_stats) =
         home_statistics(&history(), &play_events(), &play_counts(), &stats_period());
-    let show_home_demo = history().is_empty() && play_events().is_empty();
     let background_color_value = if background_color().is_empty() {
         default_background_color(&effective_appearance_theme()).to_string()
     } else {
@@ -393,7 +381,6 @@ pub(super) fn PageContent() -> Element {
         playlist_detail: playlist_detail,
         album_detail_name: album_detail_name,
         album_detail_tracks: album_detail_tracks,
-        visible_local_playlist_count: visible_local_playlist_count,
         favorite_playlist_id: favorite_playlist_id,
         now_playing_previous_source: now_playing_previous_source,
         now_playing_next_source: now_playing_next_source,
@@ -404,7 +391,6 @@ pub(super) fn PageContent() -> Element {
         home_albums: home_albums,
         artist_stats: artist_stats,
         song_stats: song_stats,
-        show_home_demo: show_home_demo,
         background_color_value: background_color_value,
         background_picker_color: background_picker_color,
         library_folder_rows: library_folder_rows,

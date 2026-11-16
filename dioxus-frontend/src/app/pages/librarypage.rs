@@ -14,7 +14,7 @@ pub(super) fn LibraryPage(data: std::rc::Rc<PageData>) -> Element {
     match Page::Library {
         Page::Library => rsx! {
             header { class: "library-page-heading",
-                h1 { "Local library" }
+                h1 { "Local files" }
                 button { class: "outline-button compact-action", onclick: move |_| {
                     app_state.folder_manager_open.set(true);
                     spawn(async move {
@@ -27,7 +27,7 @@ pub(super) fn LibraryPage(data: std::rc::Rc<PageData>) -> Element {
             }
             div { class: "library-toolbar",
                 label { class: "local-library-search",
-                    input { r#type: "search", placeholder: "Filter your library", value: "{(app_state.library_query)()}", oninput: move |event| app_state.library_query.set(event.value()) }
+                    input { r#type: "search", placeholder: "Search local files", aria_label: "Search local files", value: "{(app_state.library_query)()}", oninput: move |event| app_state.library_query.set(event.value()) }
                 }
                 label { class: "library-sort-control", "Group by"
                     CustomSelect {
@@ -48,7 +48,7 @@ pub(super) fn LibraryPage(data: std::rc::Rc<PageData>) -> Element {
             }
             if (app_state.library_sort)() == "folders" {
                 if library_folder_rows.is_empty() {
-                    p { class: "library-empty", "Choose a music folder to import local tracks." }
+                    p { class: "library-empty", "Choose a music folder to import local tracks" }
                 }
                 for folder in library_folder_rows.clone() {
                     {
@@ -109,7 +109,7 @@ pub(super) fn LibraryPage(data: std::rc::Rc<PageData>) -> Element {
                     }
                 }
             } else {
-                if library_groups.is_empty() { p { class: "library-empty", "Choose a music folder to import local tracks." } }
+                if library_groups.is_empty() { p { class: "library-empty", "Choose a music folder to import local tracks" } }
                 for (group_index, (name, tracks)) in library_groups.clone().into_iter().enumerate() {
                     {
                         let group_key = format!("{}:{name}", (app_state.library_sort)());

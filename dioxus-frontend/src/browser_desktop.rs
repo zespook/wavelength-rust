@@ -14,8 +14,8 @@ async fn call_js<T: DeserializeOwned>(function: &str, arguments: &[Value]) -> Re
         .recv::<String>()
         .await
         .map_err(|error| format!("The app bridge failed: {error}"))?;
-    let response: Value =
-        serde_json::from_str(&response).map_err(|error| format!("The app bridge returned invalid data: {error}"))?;
+    let response: Value = serde_json::from_str(&response)
+        .map_err(|error| format!("The app bridge returned invalid data: {error}"))?;
     if response.get("ok").and_then(Value::as_bool) != Some(true) {
         return Err(response
             .get("error")
@@ -34,12 +34,14 @@ async fn call_js<T: DeserializeOwned>(function: &str, arguments: &[Value]) -> Re
         .map_err(|error| format!("The app bridge returned invalid data: {error}"))
 }
 
+async fn call_js_for_side_effect(function: &str, arguments: &[Value]) -> Result<(), String> {
+    call_js::<Value>(function, arguments).await.map(|_| ())
+}
+
 fn call_js_sync(function: &str, arguments: &[Value]) -> Result<(), String> {
     let function = serde_json::to_string(function).map_err(|error| error.to_string())?;
     let arguments = serde_json::to_string(arguments).map_err(|error| error.to_string())?;
-    let script = format!(
-        "globalThis.__WAVELENGTH_BROWSER__[{function}](...{arguments});"
-    );
+    let script = format!("globalThis.__WAVELENGTH_BROWSER__[{function}](...{arguments});");
     desktop::window()
         .webview
         .evaluate_script(&script)
@@ -60,6 +62,14 @@ pub fn save<T: Serialize + ?Sized>(key: &str, value: &T) -> Result<(), String> {
 
 pub fn remove_local(key: &str) -> Result<(), String> {
     crate::desktop::remove_local(key)
+}
+
+pub fn room_server_passcode() -> Result<Option<String>, String> {
+    crate::desktop::room_server_passcode()
+}
+
+pub fn set_room_server_passcode(passcode: Option<&str>) -> Result<(), String> {
+    crate::desktop::set_room_server_passcode(passcode)
 }
 
 pub fn install_hover_marquee() -> Result<(), String> {
@@ -104,8 +114,8 @@ pub async fn install_update(version: &str) -> Result<(), String> {
     Ok(())
 }
 
-pub fn install_window_dragging() -> Result<(), String> {
-    Ok(())
+pub fn drag_window() {
+    desktop::window().drag();
 }
 
 pub fn effective_theme(theme: &str) -> Result<String, String> {
@@ -137,14 +147,34 @@ pub fn start_rail_resize() -> Result<(), String> {
 
 pub fn watch_narrow_window(mut callback: impl FnMut(bool) + 'static) -> Result<(), String> {
     let window = desktop::window();
-    callback(window.inner_size().width as f64 / window.scale_factor() < 948.0);
+    let mut scale_factor = window.scale_factor();
+    let mut is_narrow = window.inner_size().width as f64 / scale_factor < 948.0;
+    callback(is_narrow);
     window.create_wry_event_handler(move |event, _| {
-        if let dioxus::desktop::tao::event::Event::WindowEvent {
-            event: dioxus::desktop::WindowEvent::Resized(size),
-            ..
-        } = event
-        {
-            callback(size.width as f64 / desktop::window().scale_factor() < 948.0);
+        let width = match event {
+            dioxus::desktop::tao::event::Event::WindowEvent {
+                event: dioxus::desktop::WindowEvent::Resized(size),
+                ..
+            } => Some(size.width),
+            dioxus::desktop::tao::event::Event::WindowEvent {
+                event:
+                    dioxus::desktop::WindowEvent::ScaleFactorChanged {
+                        scale_factor: updated_scale_factor,
+                        new_inner_size,
+                    },
+                ..
+            } => {
+                scale_factor = *updated_scale_factor;
+                Some(new_inner_size.width)
+            }
+            _ => None,
+        };
+        if let Some(width) = width {
+            let next_is_narrow = width as f64 / scale_factor < 948.0;
+            if next_is_narrow != is_narrow {
+                is_narrow = next_is_narrow;
+                callback(is_narrow);
+            }
         }
     });
     Ok(())
@@ -155,28 +185,23 @@ pub fn room_invite_code() -> Result<Option<String>, String> {
 }
 
 pub async fn copy_room_code(code: &str) -> Result<(), String> {
-    call_js("copyRoomCode", &[Value::String(code.to_string())]).await
+    call_js_for_side_effect("copyRoomCode", &[Value::String(code.to_string())]).await
 }
 
 pub async fn copy_room_invite(code: &str) -> Result<(), String> {
-    call_js("copyRoomInvite", &[Value::String(code.to_string())]).await
+    call_js_for_side_effect("copyRoomInvite", &[Value::String(code.to_string())]).await
 }
 
 pub async fn restore_spotify() -> Result<Option<SpotifyRestore>, String> {
-    let Some(token) = crate::desktop::spotify_refresh_token()? else {
-        return Ok(None);
-    };
-    call_js::<bool>(
-        "setSpotifyRefreshToken",
-        &[Value::String(token)],
-    )
-    .await?;
+    if let Some(token) = crate::desktop::spotify_refresh_token()? {
+        call_js::<bool>("setSpotifyRefreshToken", &[Value::String(token)]).await?;
+    }
     call_js("restoreSpotify", &[]).await
 }
 
 pub async fn connect_spotify() -> Result<(), String> {
     let token = crate::desktop::connect_spotify().await?;
-    call_js("setSpotifyRefreshToken", &[Value::String(token)]).await
+    call_js_for_side_effect("setSpotifyRefreshToken", &[Value::String(token)]).await
 }
 
 pub async fn spotify_library() -> Result<Vec<Track>, String> {
@@ -196,7 +221,7 @@ pub async fn save_spotify_playlist(
     name: &str,
     track_uris: &[String],
 ) -> Result<(), String> {
-    call_js(
+    call_js_for_side_effect(
         "saveSpotifyPlaylist",
         &[
             Value::String(id.to_string()),
@@ -229,6 +254,12 @@ pub async fn search(query: &str, source: &str) -> Result<Vec<Track>, String> {
 
 pub fn play() -> Result<(), String> {
     call_js_sync("playAudio", &[])
+}
+
+pub async fn play_source(source: &str) -> Result<(), String> {
+    call_js::<bool>("playAudioSource", &[Value::String(source.to_string())])
+        .await
+        .map(|_| ())
 }
 
 pub fn pause() -> Result<(), String> {

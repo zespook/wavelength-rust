@@ -47,6 +47,7 @@ downloads/
 dioxus-frontend/resources/services/
 dioxus-frontend/resources/services.zip
 dioxus-frontend/resources/services.tar.gz
+dioxus-frontend/resources/service-build/
 
 # Retired frontend outputs and local design references
 svelte-frontend/

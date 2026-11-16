@@ -64,6 +64,4 @@ if [[ ! -x "$API_RESOURCE_DIR/WavelengthLocalService" || ! -x "$RUNTIME_RESOURCE
 	exit 1
 fi
 
-tar -czf "$ROOT_DIR/dioxus-frontend/resources/services.tar.gz" -C "$RESOURCE_DIR" .
-
-echo "Combined local audio/Qobuz service and Node.js runtime are ready for Dioxus bundling."
+echo "Combined local audio/Qobuz service and Node.js runtime are ready for desktop development."

@@ -961,6 +961,45 @@ async def download_status(video_ids: str = Query(...)):
     return {"tracks": tracks}
 
 
+@app.get("/lyrics")
+async def lyrics(title: str = Query(...), artist: str = Query(...)):
+    title = title.strip()
+    artist = artist.strip()
+    if not title or not artist:
+        raise HTTPException(400, "A song title and artist are required.")
+
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            response = await client.get(
+                "https://lrclib.net/api/get",
+                params={"track_name": title, "artist_name": artist},
+                headers={"User-Agent": "Wavelength/2.0"},
+            )
+        if response.status_code == 404:
+            raise HTTPException(404, "No lyrics found.")
+        response.raise_for_status()
+        data = response.json()
+    except httpx.TimeoutException as error:
+        logger.warning("LRCLIB request timed out for %r by %r", title, artist)
+        raise HTTPException(504, "Lyrics are temporarily unavailable.") from error
+    except httpx.HTTPError as error:
+        logger.warning("LRCLIB request failed: %s", error)
+        raise HTTPException(502, "Lyrics are temporarily unavailable.") from error
+    except json.JSONDecodeError as error:
+        logger.warning("LRCLIB returned invalid JSON: %s", error)
+        raise HTTPException(502, "LRCLIB returned invalid lyrics data.") from error
+
+    if not isinstance(data, dict):
+        raise HTTPException(502, "LRCLIB returned invalid lyrics data.")
+
+    synced_lyrics = data.get("syncedLyrics")
+    plain_lyrics = data.get("plainLyrics")
+    return {
+        "syncedLyrics": synced_lyrics if isinstance(synced_lyrics, str) else None,
+        "plainLyrics": plain_lyrics if isinstance(plain_lyrics, str) else None,
+    }
+
+
 @app.get("/logs")
 async def download_logs(limit: int = Query(100, ge=1, le=500)):
     global _log_file_mtime_ns

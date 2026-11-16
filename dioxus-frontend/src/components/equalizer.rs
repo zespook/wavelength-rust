@@ -1,5 +1,6 @@
 use super::CustomSelect;
 use crate::browser;
+use crate::components::Icon;
 use crate::*;
 use dioxus::prelude::*;
 
@@ -392,10 +393,25 @@ pub(crate) fn EqualizerPage(notice: Signal<String>) -> Element {
                             }
                         }
                     }
-                    label { class: "equalizer-parameter",
-                        span { "Q" }
+                    div { class: "equalizer-parameter",
+                        div { class: "equalizer-parameter-heading",
+                            span { "Q" }
+                            button {
+                                class: "equalizer-parameter-help-trigger",
+                                r#type: "button",
+                                aria_label: "Q factor help",
+                                aria_describedby: "equalizer-q-tooltip-{band_index}",
+                                title: "Q controls band width: higher values narrow the effect; lower values broaden it.",
+                                Icon { name: "help" }
+                                span {
+                                    id: "equalizer-q-tooltip-{band_index}",
+                                    class: "equalizer-parameter-tooltip",
+                                    role: "tooltip",
+                                    "Q controls band width: higher values narrow the effect; lower values broaden it."
+                                }
+                            }
+                        }
                         output { "{selected_q:.1}" }
-                        small { class: "equalizer-parameter-help", "Q controls band width: higher values narrow the effect; lower values broaden it." }
                         input { r#type: "range", min: "0.3", max: "10", step: "0.1",
                             value: "{selected_q}", aria_label: "Band {band_index + 1} Q factor", disabled: unavailable(),
                             oninput: move |event| if let Ok(value) = event.value().parse::<f64>() {

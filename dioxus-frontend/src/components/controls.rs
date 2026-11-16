@@ -1,4 +1,4 @@
-use crate::UpdateInfo;
+use crate::{NotificationLog, UpdateInfo, record_notification};
 use dioxus::prelude::*;
 
 #[component]
@@ -83,13 +83,17 @@ pub(crate) fn CustomSelect(
 }
 
 #[component]
-pub(crate) fn AppNotice(mut notice: Signal<String>) -> Element {
+pub(crate) fn AppNotice(
+    mut notice: Signal<String>,
+    notification_logs: Signal<Vec<NotificationLog>>,
+) -> Element {
     use_effect(move || {
         let message = notice();
         if message.is_empty() {
             return;
         }
 
+        record_notification(notification_logs, &message);
         spawn(async move {
             crate::sleep_ms(3800).await;
             if notice() == message {
@@ -185,6 +189,9 @@ pub(crate) fn Icon(name: &'static str) -> Element {
         "arrow-right" => "M5 12h14m-7-7 7 7-7 7",
         "more" => "M5 12h.01M12 12h.01M19 12h.01",
         "disc" => "M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18Zm0 6a3 3 0 1 0 0 6 3 3 0 0 0 0-6Zm0 3h.01",
+        "help" => {
+            "M9.09 9a3 3 0 0 1 5.82 1c0 2-3 3-3 3m.09 4h.01M22 12a10 10 0 1 1-20 0 10 10 0 0 1 20 0Z"
+        }
         "expand" => {
             "M8 3H5a2 2 0 0 0-2 2v3m13-5h3a2 2 0 0 1 2 2v3M3 16v3a2 2 0 0 0 2 2h3m13-5v3a2 2 0 0 1-2 2h-3"
         }
@@ -203,6 +210,7 @@ pub(crate) fn Icon(name: &'static str) -> Element {
         "search" => "M11 3a8 8 0 1 0 0 16 8 8 0 0 0 0-16Zm10 18-4.3-4.3",
         "library" => "M4 5v14M9 5v14M15 5l4 14",
         "list" => "M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01",
+        "grid" => "M3 3h7v7H3zM14 3h7v7h-7zM14 14h7v7h-7zM3 14h7v7H3z",
         "queue" => "M4 6h16M4 12h16M4 18h10",
         "shuffle" => "M16 3h5v5M4 20l5.5-5.5M21 3l-7 7M15 14l6 7v-5m0 5h-5M4 4l5 5",
         "repeat" => "M17 1l4 4-4 4M3 11V9a4 4 0 0 1 4-4h14M7 23l-4-4 4-4m14-2v2a4 4 0 0 1-4 4H3",

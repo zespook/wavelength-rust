@@ -13,11 +13,11 @@ let args;
 if (process.platform === "win32") {
   command = "powershell.exe";
   args = ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", join(root, "run-dioxus.ps1"), action];
-} else if (process.platform === "darwin") {
+} else if (process.platform === "darwin" || process.platform === "linux") {
   command = "bash";
   args = [join(root, "run-dioxus.sh"), action];
 } else {
-  throw new Error("Native Dioxus Desktop scripts are configured for Windows and macOS.");
+  throw new Error("Native Dioxus Desktop scripts are configured for Windows, macOS, and Linux.");
 }
 
 const result = spawnSync(command, args, { stdio: "inherit" });

@@ -10,9 +10,8 @@ use sha2::{Digest, Sha256};
 use std::borrow::Cow;
 use std::{
     env,
-    ffi::OsStr,
-    fs,
-    io::{BufRead, Cursor, Read, Write},
+    fs::{self, File, OpenOptions},
+    io::{self, BufRead, Read, Write},
     net::{SocketAddr, TcpListener, TcpStream},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
@@ -22,9 +21,16 @@ use std::{
 };
 
 const APP_ID: &str = "com.wavelength.desktop";
+const APPLICATION_ICON_RESOURCE_ID: u16 = 32512;
 const AUDIO_PORT: u16 = 8787;
 const SPOTIFY_TOKEN_KEY: &str = "spotify-refresh-token";
+const ROOM_SERVER_PASSCODE_KEY: &str = "room-server-passcode";
 const AUDIO_EXTENSIONS: &[&str] = &["mp3", "flac", "m4a", "ogg", "wav", "aac", "opus"];
+const SERVICE_REPOSITORY: &str = "zespook/wavelength-rust";
+const MAX_SERVICE_PACKAGE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+const MAX_SERVICE_UNPACKED_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+const SERVICE_PACKAGE_SHA256: Option<&str> = option_env!("WAVELENGTH_SERVICES_SHA256");
+const SERVICE_PACKAGE_OVERRIDE: Option<&str> = option_env!("WAVELENGTH_SERVICES_ARCHIVE");
 static STATE: OnceLock<DesktopState> = OnceLock::new();
 static SETTINGS_LOCK: Mutex<()> = Mutex::new(());
 
@@ -181,9 +187,34 @@ fn persist_window_size(window: &dioxus::desktop::tao::window::Window) -> Result<
     )
 }
 
+#[cfg(target_os = "windows")]
+fn load_window_icon() -> Result<Option<dioxus::desktop::tao::window::Icon>, String> {
+    use dioxus::desktop::tao::platform::windows::IconExtWindows;
+
+    dioxus::desktop::tao::window::Icon::from_resource(APPLICATION_ICON_RESOURCE_ID, None)
+        .map(Some)
+        .map_err(|error| format!("Could not load the Wavelength app icon: {error}"))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn load_window_icon() -> Result<Option<dioxus::desktop::tao::window::Icon>, String> {
+    Ok(None)
+}
+
 pub fn run(app: fn() -> Element) {
-    if env::args_os().nth(1).as_deref() == Some(OsStr::new("--install-services")) {
-        if let Err(error) = install_services_for_installer() {
+    let arguments = env::args_os().skip(1).collect::<Vec<_>>();
+    if arguments.first().and_then(|argument| argument.to_str()) == Some("--install-services") {
+        let (system_install, archive_override) =
+            match parse_service_install_arguments(&arguments[1..]) {
+                Ok(arguments) => arguments,
+                Err(error) => {
+                    eprintln!("Could not install Wavelength services: {error}");
+                    std::process::exit(2);
+                }
+            };
+        if let Err(error) =
+            install_services_for_installer(system_install, archive_override.as_deref())
+        {
             eprintln!("Could not install Wavelength services: {error}");
             std::process::exit(1);
         }
@@ -209,6 +240,13 @@ pub fn run(app: fn() -> Element) {
             std::process::exit(1);
         }
     };
+    let window_icon = match load_window_icon() {
+        Ok(icon) => icon,
+        Err(error) => {
+            show_startup_error(&error);
+            std::process::exit(1);
+        }
+    };
     let (width, height) = saved_window_size(&settings).unwrap_or((1280, 800));
     let window_slot = std::sync::Arc::new(Mutex::new(None));
     let window_for_events = window_slot.clone();
@@ -222,13 +260,16 @@ pub fn run(app: fn() -> Element) {
     };
     let service_base = serde_json::to_string(&service_base)
         .expect("serializing the local service URL cannot fail");
+    let browser_source = include_str!("browser.js")
+        .replace("export function ", "function ")
+        .replace("export async function ", "async function ");
+    let browser_script = format!("(() => {{\n{browser_source}\n}})();");
     let config = Config::new()
         .with_resource_directory(&state.resource_dir)
         .with_data_directory(state.data_dir.join("webview"))
-        .with_disable_context_menu(true)
+        .with_disable_context_menu(false)
         .with_custom_head(format!(
-            "<script>globalThis.__WAVELENGTH_NATIVE__=true;globalThis.__WAVELENGTH_AUDIO_SERVICE__={service_base};</script><script type=\"module\">{}</script>",
-            include_str!("browser.js")
+            "<script>globalThis.__WAVELENGTH_NATIVE__=true;globalThis.__WAVELENGTH_AUDIO_SERVICE__={service_base};</script><script>{browser_script}</script>",
         ))
         .with_asynchronous_custom_protocol("wavelength-audio", |_id, request, responder| {
             responder.respond(audio_protocol_response(request));
@@ -236,6 +277,7 @@ pub fn run(app: fn() -> Element) {
         .with_window(
             WindowBuilder::new()
                 .with_title("Wavelength")
+                .with_window_icon(window_icon)
                 .with_inner_size(LogicalSize::new(width, height))
                 .with_min_inner_size(LogicalSize::new(750.0, 600.0))
                 .with_decorations(false),
@@ -246,11 +288,14 @@ pub fn run(app: fn() -> Element) {
             }
         })
         .with_custom_event_handler(move |event, _| {
-            if let dioxus::desktop::tao::event::Event::WindowEvent {
-                event: dioxus::desktop::WindowEvent::CloseRequested,
-                ..
-            } = event
-            {
+            if matches!(
+                event,
+                dioxus::desktop::tao::event::Event::WindowEvent {
+                    event: dioxus::desktop::WindowEvent::CloseRequested
+                        | dioxus::desktop::WindowEvent::Resized(_),
+                    ..
+                }
+            ) {
                 match window_for_events.lock() {
                     Ok(window) => {
                         if let Some(window) = window.as_ref() {
@@ -388,11 +433,13 @@ fn start_local_service(state: &mut DesktopState) -> Result<(), String> {
 
 fn service_resources_directory(state: &DesktopState) -> Result<PathBuf, String> {
     let development_dir = state.resource_dir.join("resources").join("services");
-    if development_dir.is_dir() {
-        return Ok(development_dir);
-    }
     if cfg!(debug_assertions) {
         return Ok(development_dir);
+    }
+
+    #[cfg(target_os = "linux")]
+    if service_directory_is_current(Path::new("/usr/lib/wavelength/services")) {
+        return Ok(PathBuf::from("/usr/lib/wavelength/services"));
     }
 
     let installed_dir = state.resource_dir.join("services");
@@ -405,78 +452,158 @@ fn service_resources_directory(state: &DesktopState) -> Result<PathBuf, String> 
         return Ok(extraction_dir);
     }
 
-    rfd::MessageDialog::new()
-        .set_title("Preparing Wavelength")
-        .set_description(
-            "Wavelength needs to download its local audio services the first time it starts. An internet connection is required.",
-        )
-        .set_level(rfd::MessageLevel::Info)
-        .show();
+    ensure_service_installation(&state.data_dir, None, None, true)
+}
 
-    let archive_bytes = download_service_archive()?;
-    let staging_dir = state
-        .data_dir
-        .join(format!("bundled-services-{}.staging", std::process::id()));
+fn ensure_service_installation(
+    data_dir: &Path,
+    destination_override: Option<&Path>,
+    archive_override: Option<&Path>,
+    show_progress: bool,
+) -> Result<PathBuf, String> {
+    let destination = destination_override
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| data_dir.join("bundled-services"));
+    if service_directory_is_current(&destination) {
+        return Ok(destination);
+    }
+
+    if show_progress {
+        rfd::MessageDialog::new()
+            .set_title("Preparing Wavelength")
+            .set_description(
+                "Wavelength is preparing its local audio services. An internet connection is only needed if the matching package is not available on this device.",
+            )
+            .set_level(rfd::MessageLevel::Info)
+            .show();
+    }
+
+    let download_dir = destination.parent().unwrap_or(data_dir);
+    fs::create_dir_all(download_dir).map_err(|error| {
+        format!("Could not prepare the service installation directory: {error}")
+    })?;
+    let staging_dir = destination.with_file_name(format!(
+        "{}-{}.staging",
+        destination
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("wavelength-services"),
+        std::process::id()
+    ));
     if staging_dir.exists() {
         fs::remove_dir_all(&staging_dir)
             .map_err(|error| format!("Could not clear the incomplete service download: {error}"))?;
     }
     fs::create_dir_all(&staging_dir)
         .map_err(|error| format!("Could not prepare the service download: {error}"))?;
-    extract_service_archive(&archive_bytes, &staging_dir)?;
 
-    let staging_executable = service_executable(&staging_dir);
-    if !staging_executable.is_file() {
-        return Err(
-            "The downloaded services are missing their local service executable.".to_string(),
+    let (archive_path, is_temporary_archive) =
+        match download_service_package(download_dir, archive_override) {
+            Ok(package) => package,
+            Err(error) => return cleanup_failed_service_install(&staging_dir, None, error),
+        };
+    let install_result = (|| {
+        extract_service_package(&archive_path, &staging_dir)?;
+        if !service_executable(&staging_dir).is_file() {
+            return Err("The downloaded package is missing the local audio service.".to_string());
+        }
+        if !service_runtime_executable(&staging_dir).is_file() {
+            return Err("The downloaded package is missing its Node.js runtime.".to_string());
+        }
+        let package_hash = service_package_sha256()?;
+        fs::write(
+            staging_dir.join(".wavelength-service-version"),
+            format!("{}\n{package_hash}\n", env!("CARGO_PKG_VERSION")),
+        )
+        .map_err(|error| format!("Could not mark the installed service version: {error}"))?;
+        replace_service_directory(&staging_dir, &destination)
+    })();
+    if let Err(error) = install_result {
+        return cleanup_failed_service_install(
+            &staging_dir,
+            is_temporary_archive.then_some(archive_path.as_path()),
+            error,
         );
     }
-    fs::write(
-        staging_dir.join(".wavelength-service-version"),
-        env!("CARGO_PKG_VERSION"),
-    )
-    .map_err(|error| format!("Could not mark the downloaded service version: {error}"))?;
-    replace_service_directory(&staging_dir, &extraction_dir)?;
-    Ok(extraction_dir)
+    if is_temporary_archive {
+        fs::remove_file(&archive_path).map_err(|error| {
+            format!(
+                "Services were installed, but the downloaded archive could not be removed: {error}"
+            )
+        })?;
+    }
+    Ok(destination)
 }
 
 fn service_directory_is_current(directory: &Path) -> bool {
-    service_executable(directory).is_file()
-        && fs::read_to_string(directory.join(".wavelength-service-version"))
-            .is_ok_and(|version| version.trim() == env!("CARGO_PKG_VERSION"))
+    if !service_executable(directory).is_file() || !service_runtime_executable(directory).is_file()
+    {
+        return false;
+    }
+    let Ok(marker) = fs::read_to_string(directory.join(".wavelength-service-version")) else {
+        return false;
+    };
+    let mut lines = marker.lines();
+    lines
+        .next()
+        .is_some_and(|version| version == env!("CARGO_PKG_VERSION"))
+        && service_package_sha256().is_ok_and(|expected| {
+            lines
+                .next()
+                .is_some_and(|installed| installed.eq_ignore_ascii_case(&expected))
+        })
 }
 
-fn install_services_for_installer() -> Result<(), String> {
-    let resource_dir = resource_directory()?;
-    let destination = resource_dir.join("services");
-    if service_directory_is_current(&destination) {
-        return Ok(());
+fn install_services_for_installer(
+    system_install: bool,
+    archive_override: Option<&Path>,
+) -> Result<(), String> {
+    if system_install {
+        #[cfg(target_os = "linux")]
+        {
+            ensure_service_installation(
+                Path::new("/usr/lib/wavelength"),
+                Some(Path::new("/usr/lib/wavelength/services")),
+                archive_override,
+                false,
+            )?;
+            return Ok(());
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            return Err("System-wide service installation is only available on Linux.".to_string());
+        }
     }
-    fs::create_dir_all(&resource_dir)
-        .map_err(|error| format!("Could not prepare the application resources: {error}"))?;
 
-    let archive_bytes = download_service_archive()?;
-    let staging_dir = resource_dir.join(format!("services-{}.staging", std::process::id()));
-    if staging_dir.exists() {
-        fs::remove_dir_all(&staging_dir)
-            .map_err(|error| format!("Could not clear the incomplete service download: {error}"))?;
-    }
-    fs::create_dir_all(&staging_dir)
-        .map_err(|error| format!("Could not prepare the service download: {error}"))?;
-    extract_service_archive(&archive_bytes, &staging_dir)?;
-
-    if !service_executable(&staging_dir).is_file() {
-        return Err(
-            "The downloaded services are missing their local service executable.".to_string(),
-        );
-    }
-    fs::write(
-        staging_dir.join(".wavelength-service-version"),
-        env!("CARGO_PKG_VERSION"),
-    )
-    .map_err(|error| format!("Could not mark the downloaded service version: {error}"))?;
-    replace_service_directory(&staging_dir, &destination)?;
+    let data_dir = project_dirs()?.data_dir().to_path_buf();
+    ensure_service_installation(&data_dir, None, archive_override, false)?;
     Ok(())
+}
+
+fn parse_service_install_arguments(
+    arguments: &[std::ffi::OsString],
+) -> Result<(bool, Option<PathBuf>), String> {
+    let mut system_install = false;
+    let mut archive_override = None;
+    let mut index = 0;
+    while index < arguments.len() {
+        match arguments[index].to_str() {
+            Some("--system") if !system_install => {
+                system_install = true;
+                index += 1;
+            }
+            Some("--archive") if archive_override.is_none() => {
+                let path = arguments
+                    .get(index + 1)
+                    .filter(|path| !path.is_empty())
+                    .ok_or_else(|| "expected a path after --archive.".to_string())?;
+                archive_override = Some(PathBuf::from(path));
+                index += 2;
+            }
+            _ => return Err("unexpected installer arguments.".to_string()),
+        }
+    }
+    Ok((system_install, archive_override))
 }
 
 fn service_executable(services_dir: &Path) -> PathBuf {
@@ -489,110 +616,294 @@ fn service_executable(services_dir: &Path) -> PathBuf {
         })
 }
 
-fn download_service_archive() -> Result<Vec<u8>, String> {
-    let filename = match update_platform() {
-        "windows-x86_64" => "Wavelength_services_windows_x86_64.zip",
-        "darwin-x86_64" => "Wavelength_services_darwin-x86_64.tar.gz",
-        "darwin-aarch64" => "Wavelength_services_darwin-aarch64.tar.gz",
-        _ => return Err("Local services are not packaged for this platform.".to_string()),
-    };
-    let asset_url = format!(
-        "https://github.com/zespook/wavelength-rust/releases/download/v{}/{filename}",
-        env!("CARGO_PKG_VERSION")
-    );
-    let signature_url = format!("{asset_url}.minisig");
-    let client = reqwest::blocking::Client::builder()
-        .user_agent("Wavelength")
-        .timeout(Duration::from_secs(900))
-        .build()
-        .map_err(|error| format!("Could not prepare the service download: {error}"))?;
+fn service_runtime_executable(services_dir: &Path) -> PathBuf {
+    services_dir
+        .join("runtime")
+        .join(if cfg!(target_os = "windows") {
+            "node.exe"
+        } else {
+            "node"
+        })
+}
 
-    let signature_response = client
-        .get(&signature_url)
-        .send()
-        .map_err(|error| format!("Could not download the service signature: {error}"))?;
-    if !signature_response.status().is_success() {
-        return Err(format!(
-            "The service signature download returned status {}.",
-            signature_response.status()
-        ));
+fn service_package_sha256() -> Result<&'static str, String> {
+    let hash = SERVICE_PACKAGE_SHA256.ok_or_else(|| {
+        "This app build has no verified service package configured. Rebuild it with the release packaging workflow."
+            .to_string()
+    })?;
+    if hash.len() != 64 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err("This app build has an invalid service package checksum.".to_string());
     }
-    let signature_bytes = read_bounded_response(signature_response, 16 * 1024, "signature")?;
-    let signature_text = std::str::from_utf8(&signature_bytes)
-        .map_err(|_| "The service signature is not valid UTF-8.".to_string())?;
-    let signature = minisign_verify::Signature::decode(signature_text)
-        .map_err(|error| format!("The service signature is invalid: {error}"))?;
+    Ok(hash)
+}
 
-    let response = client
-        .get(&asset_url)
-        .send()
-        .map_err(|error| format!("Could not download the local services: {error}"))?;
-    if !response.status().is_success() {
-        return Err(format!(
-            "The service download returned status {}.",
-            response.status()
-        ));
+fn service_package_platform() -> Result<&'static str, String> {
+    #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+    return Ok("windows-x86_64");
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    return Ok("linux-x86_64");
+    #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+    return Ok("darwin-x86_64");
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    return Ok("darwin-aarch64");
+    #[allow(unreachable_code)]
+    Err("Compiled service packages are not available for this platform.".to_string())
+}
+
+fn service_package_asset_name() -> Result<String, String> {
+    Ok(format!(
+        "Wavelength_{}_services_{}.zip",
+        env!("CARGO_PKG_VERSION"),
+        service_package_platform()?
+    ))
+}
+
+fn download_service_package(
+    data_dir: &Path,
+    archive_override: Option<&Path>,
+) -> Result<(PathBuf, bool), String> {
+    let expected_hash = service_package_sha256()?;
+    if let Some(path) = archive_override.or_else(|| SERVICE_PACKAGE_OVERRIDE.map(Path::new)) {
+        match verify_service_package_hash(path, &expected_hash) {
+            Ok(()) => return Ok((path.to_path_buf(), false)),
+            Err(error) => {
+                eprintln!(
+                    "The local compiled services package at '{}' could not be used: {error}. Downloading the matching release package instead.",
+                    path.display()
+                );
+                let local_error = error;
+                return download_service_package_from_release(data_dir, &expected_hash)
+                    .map(|path| (path, true))
+                    .map_err(|error| format!("{error} (local package rejected: {local_error})"));
+            }
+        }
     }
-    let bytes = read_bounded_response(response, MAX_SERVICE_BYTES, "service archive")?;
-    let public_key = minisign_verify::PublicKey::decode(UPDATE_PUBLIC_KEY)
-        .map_err(|error| format!("The embedded update verification key is invalid: {error}"))?;
-    public_key
-        .verify(&bytes, &signature, false)
-        .map_err(|error| {
-            format!("The downloaded services failed signature verification: {error}")
+
+    download_service_package_from_release(data_dir, &expected_hash).map(|path| (path, true))
+}
+
+fn download_service_package_from_release(
+    data_dir: &Path,
+    expected_hash: &str,
+) -> Result<PathBuf, String> {
+    fs::create_dir_all(data_dir)
+        .map_err(|error| format!("Could not prepare the service download directory: {error}"))?;
+    let archive_path = data_dir.join(format!(
+        "wavelength-services-{}.zip.part",
+        std::process::id()
+    ));
+    if archive_path.exists() {
+        fs::remove_file(&archive_path)
+            .map_err(|error| format!("Could not clear a previous service download: {error}"))?;
+    }
+
+    let result = (|| {
+        let asset_name = service_package_asset_name()?;
+        let url = format!(
+            "https://github.com/{SERVICE_REPOSITORY}/releases/download/v{}/{asset_name}",
+            env!("CARGO_PKG_VERSION")
+        );
+        let client = reqwest::blocking::Client::builder()
+            .connect_timeout(Duration::from_secs(30))
+            .timeout(Duration::from_secs(30 * 60))
+            .user_agent(format!("Wavelength/{}", env!("CARGO_PKG_VERSION")))
+            .build()
+            .map_err(|error| format!("Could not prepare the service download: {error}"))?;
+        let mut response = client
+            .get(url)
+            .send()
+            .map_err(|error| format!("Could not download the compiled services: {error}"))?;
+        if !response.status().is_success() {
+            return Err(format!(
+                "The compiled service download failed with status {}.",
+                response.status()
+            ));
+        }
+        if response
+            .content_length()
+            .is_some_and(|length| length > MAX_SERVICE_PACKAGE_BYTES)
+        {
+            return Err(
+                "The compiled service package exceeds the allowed download size.".to_string(),
+            );
+        }
+
+        let mut file = File::create(&archive_path)
+            .map_err(|error| format!("Could not save the compiled service package: {error}"))?;
+        let mut hasher = Sha256::new();
+        let mut total_bytes = 0u64;
+        let mut buffer = [0u8; 64 * 1024];
+        loop {
+            let count = response.read(&mut buffer).map_err(|error| {
+                format!("The compiled service download was interrupted: {error}")
+            })?;
+            if count == 0 {
+                break;
+            }
+            total_bytes = total_bytes.saturating_add(count as u64);
+            if total_bytes > MAX_SERVICE_PACKAGE_BYTES {
+                return Err(
+                    "The compiled service package exceeds the allowed download size.".to_string(),
+                );
+            }
+            file.write_all(&buffer[..count])
+                .map_err(|error| format!("Could not save the compiled service package: {error}"))?;
+            hasher.update(&buffer[..count]);
+        }
+        if total_bytes == 0 {
+            return Err("The compiled service download was empty.".to_string());
+        }
+        file.sync_all().map_err(|error| {
+            format!("Could not finish saving the compiled service package: {error}")
         })?;
-    Ok(bytes)
+        let actual_hash = format!("{:x}", hasher.finalize());
+        if !actual_hash.eq_ignore_ascii_case(expected_hash) {
+            return Err(
+                "The compiled service package failed its SHA-256 integrity check.".to_string(),
+            );
+        }
+        Ok(())
+    })();
+    if let Err(error) = result {
+        if let Err(cleanup_error) = fs::remove_file(&archive_path) {
+            if cleanup_error.kind() != std::io::ErrorKind::NotFound {
+                return Err(format!(
+                    "{error}; could not remove the incomplete service download: {cleanup_error}"
+                ));
+            }
+        }
+        return Err(error);
+    }
+    Ok(archive_path)
 }
 
-fn read_bounded_response(
-    response: reqwest::blocking::Response,
-    max_bytes: u64,
-    description: &str,
-) -> Result<Vec<u8>, String> {
-    if response
-        .content_length()
-        .is_some_and(|length| length > max_bytes)
-    {
-        return Err(format!(
-            "The {description} exceeds the supported size limit."
-        ));
+fn verify_service_package_hash(path: &Path, expected_hash: &str) -> Result<(), String> {
+    let metadata = fs::metadata(path)
+        .map_err(|error| format!("The configured service package is unavailable: {error}"))?;
+    if metadata.len() > MAX_SERVICE_PACKAGE_BYTES {
+        return Err("The compiled service package exceeds the allowed download size.".to_string());
     }
-    let mut bytes = Vec::new();
-    response
-        .take(max_bytes + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|error| format!("Could not read the {description}: {error}"))?;
-    if bytes.len() as u64 > max_bytes {
-        return Err(format!(
-            "The {description} exceeds the supported size limit."
-        ));
+    let mut file = File::open(path)
+        .map_err(|error| format!("Could not open the compiled service package: {error}"))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let count = file
+            .read(&mut buffer)
+            .map_err(|error| format!("Could not verify the compiled service package: {error}"))?;
+        if count == 0 {
+            break;
+        }
+        hasher.update(&buffer[..count]);
     }
-    Ok(bytes)
-}
-
-fn extract_service_archive(bytes: &[u8], destination: &Path) -> Result<(), String> {
-    #[cfg(target_os = "windows")]
-    {
-        let mut archive = zip::ZipArchive::new(Cursor::new(bytes))
-            .map_err(|error| format!("The downloaded service archive is invalid: {error}"))?;
-        archive
-            .extract(destination)
-            .map_err(|error| format!("Could not unpack the downloaded services: {error}"))?;
-    }
-    #[cfg(target_os = "macos")]
-    {
-        let decoder = flate2::read::GzDecoder::new(Cursor::new(bytes));
-        let mut archive = tar::Archive::new(decoder);
-        archive
-            .unpack(destination)
-            .map_err(|error| format!("Could not unpack the downloaded services: {error}"))?;
-    }
-    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-    {
-        let _ = (bytes, destination);
-        return Err("Local services are not packaged for this platform.".to_string());
+    let actual_hash = format!("{:x}", hasher.finalize());
+    if !actual_hash.eq_ignore_ascii_case(expected_hash) {
+        return Err("The compiled service package failed its SHA-256 integrity check.".to_string());
     }
     Ok(())
+}
+
+fn extract_service_package(archive_path: &Path, destination: &Path) -> Result<(), String> {
+    let archive = File::open(archive_path)
+        .map_err(|error| format!("Could not open the compiled service package: {error}"))?;
+    let mut archive = zip::ZipArchive::new(archive).map_err(|error| {
+        format!("The compiled service package is not a valid ZIP archive: {error}")
+    })?;
+    let mut total_unpacked = 0u64;
+    for index in 0..archive.len() {
+        let mut entry = archive
+            .by_index(index)
+            .map_err(|error| format!("Could not read the compiled service package: {error}"))?;
+        let relative_path = entry
+            .enclosed_name()
+            .ok_or_else(|| "The compiled service package contains an unsafe path.".to_string())?
+            .to_path_buf();
+        if relative_path
+            .components()
+            .any(|component| !matches!(component, std::path::Component::Normal(_)))
+        {
+            return Err("The compiled service package contains an unsafe path.".to_string());
+        }
+        let output_path = destination.join(&relative_path);
+        if entry.is_dir() {
+            fs::create_dir_all(&output_path).map_err(|error| {
+                format!("Could not extract the compiled service package: {error}")
+            })?;
+            continue;
+        }
+        let mode = entry.unix_mode();
+        if mode.is_some_and(|mode| mode & 0o170000 == 0o120000) {
+            return Err(
+                "The compiled service package contains an unsupported symbolic link.".to_string(),
+            );
+        }
+        let expected_size = entry.size();
+        total_unpacked = total_unpacked
+            .checked_add(expected_size)
+            .ok_or_else(|| "The compiled service package is too large to extract.".to_string())?;
+        if total_unpacked > MAX_SERVICE_UNPACKED_BYTES {
+            return Err(
+                "The compiled service package expands beyond the allowed size.".to_string(),
+            );
+        }
+        let parent = output_path
+            .parent()
+            .ok_or_else(|| "The compiled service package contains an invalid path.".to_string())?;
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("Could not extract the compiled service package: {error}"))?;
+        let mut output = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&output_path)
+            .map_err(|error| format!("Could not extract a service package file: {error}"))?;
+        let remaining_size = MAX_SERVICE_UNPACKED_BYTES - (total_unpacked - expected_size);
+        let copied = io::copy(&mut (&mut entry).take(remaining_size + 1), &mut output)
+            .map_err(|error| format!("Could not extract a service package file: {error}"))?;
+        if copied > remaining_size {
+            return Err(
+                "The compiled service package expands beyond the allowed size.".to_string(),
+            );
+        }
+        if copied != expected_size {
+            return Err("A file in the compiled service package was incomplete.".to_string());
+        }
+        #[cfg(unix)]
+        if let Some(mode) = mode {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&output_path, fs::Permissions::from_mode(mode & 0o777))
+                .map_err(|error| format!("Could not set service file permissions: {error}"))?;
+        }
+    }
+    Ok(())
+}
+
+fn cleanup_failed_service_install(
+    staging_dir: &Path,
+    archive_path: Option<&Path>,
+    error: String,
+) -> Result<PathBuf, String> {
+    let mut cleanup_errors = Vec::new();
+    if staging_dir.exists() {
+        if let Err(cleanup_error) = fs::remove_dir_all(staging_dir) {
+            cleanup_errors.push(format!(
+                "could not remove incomplete service files: {cleanup_error}"
+            ));
+        }
+    }
+    if let Some(archive_path) = archive_path {
+        if let Err(cleanup_error) = fs::remove_file(archive_path) {
+            if cleanup_error.kind() != std::io::ErrorKind::NotFound {
+                cleanup_errors.push(format!(
+                    "could not remove the downloaded archive: {cleanup_error}"
+                ));
+            }
+        }
+    }
+    if cleanup_errors.is_empty() {
+        Err(error)
+    } else {
+        Err(format!("{error}; {}", cleanup_errors.join("; ")))
+    }
 }
 
 fn replace_service_directory(staging: &Path, destination: &Path) -> Result<(), String> {
@@ -612,13 +923,11 @@ fn replace_service_directory(staging: &Path, destination: &Path) -> Result<(), S
         if had_existing {
             fs::rename(&backup, destination).map_err(|restore_error| {
                 format!(
-                    "Could not install the downloaded services ({error}) or restore the previous installation ({restore_error})."
+                    "Could not install the service build ({error}) or restore the previous installation ({restore_error})."
                 )
             })?;
         }
-        return Err(format!(
-            "Could not install the downloaded services: {error}"
-        ));
+        return Err(format!("Could not install the service build: {error}"));
     }
     if had_existing {
         fs::remove_dir_all(&backup).map_err(|error| {
@@ -1054,7 +1363,19 @@ pub fn local_url(track_id: &str) -> Result<String, String> {
     let encoded = track_id
         .strip_prefix("local-")
         .ok_or_else(|| "This is not a local audio track.".to_string())?;
-    Ok(format!("wavelength-audio://localhost/{encoded}"))
+    Ok(local_audio_protocol_url(encoded))
+}
+
+fn local_audio_protocol_url(encoded: &str) -> String {
+    #[cfg(target_os = "windows")]
+    {
+        // Wry's WebView2 workaround only rewrites custom schemes for top-level navigation.
+        format!("http://wavelength-audio.localhost/{encoded}")
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        format!("wavelength-audio://localhost/{encoded}")
+    }
 }
 
 pub fn has_local_audio_file(track_id: &str) -> Result<bool, String> {
@@ -1230,6 +1551,45 @@ pub fn room_invite_code() -> Result<Option<String>, String> {
 
 fn keyring_entry(key: &str) -> Result<keyring::Entry, String> {
     keyring::Entry::new(APP_ID, key).map_err(|error| error.to_string())
+}
+
+pub fn room_server_passcode() -> Result<Option<String>, String> {
+    let entry = keyring_entry(ROOM_SERVER_PASSCODE_KEY)?;
+    match entry.get_password() {
+        Ok(passcode) if !passcode.is_empty() => Ok(Some(passcode)),
+        Ok(_) => Ok(None),
+        Err(keyring::Error::NoEntry) => match load_local::<String>("wavelength-room-passcode")? {
+            Some(passcode) if !passcode.is_empty() => {
+                set_room_server_passcode(Some(&passcode))?;
+                remove_local("wavelength-room-passcode")?;
+                Ok(Some(passcode))
+            }
+            Some(_) => {
+                remove_local("wavelength-room-passcode")?;
+                Ok(None)
+            }
+            None => Ok(None),
+        },
+        Err(error) => Err(format!(
+            "Could not read the room server passcode from the system keychain: {error}"
+        )),
+    }
+}
+
+pub fn set_room_server_passcode(passcode: Option<&str>) -> Result<(), String> {
+    let entry = keyring_entry(ROOM_SERVER_PASSCODE_KEY)?;
+    match passcode.filter(|passcode| !passcode.is_empty()) {
+        Some(passcode) if passcode.len() <= 128 => entry.set_password(passcode).map_err(|error| {
+            format!("Could not save the room server passcode to the system keychain: {error}")
+        }),
+        Some(_) => Err("The room server passcode is invalid.".to_string()),
+        None => match entry.delete_credential() {
+            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+            Err(error) => Err(format!(
+                "Could not remove the room server passcode from the system keychain: {error}"
+            )),
+        },
+    }
 }
 
 pub fn spotify_refresh_token() -> Result<Option<String>, String> {
@@ -1458,7 +1818,6 @@ const UPDATE_FEED_URL: &str =
     "https://github.com/zespook/wavelength-rust/releases/latest/download/latest.json";
 const UPDATE_PUBLIC_KEY: &str = "untrusted comment: minisign public key BC156A4AB16ED218\nRWQY0m6xSmoVvDWRFYHrZlA6J/qJyZ3qf8iMv6rMnQvqrokliNaiaUSB";
 const MAX_UPDATE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
-const MAX_SERVICE_BYTES: u64 = 512 * 1024 * 1024;
 
 fn update_platform() -> &'static str {
     #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
@@ -1556,7 +1915,9 @@ pub async fn install_update(expected_version: &str) -> Result<(), String> {
     install_windows_update(bytes)?;
     #[cfg(target_os = "macos")]
     install_macos_update(bytes)?;
-    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    #[cfg(target_os = "linux")]
+    install_linux_update(bytes)?;
+    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
     return Err("Automatic update installation is not supported on this platform.".to_string());
     Ok(())
 }
@@ -1642,7 +2003,7 @@ fn install_macos_update(bytes: Vec<u8>) -> Result<(), String> {
         .ok_or_else(|| "The installed app bundle path is unavailable.".to_string())?;
     let script_path = temp_dir.join("install-update.sh");
     let script = format!(
-        "#!/bin/sh\nset -eu\nwhile kill -0 {} 2>/dev/null; do sleep 0.25; done\nreplacement={}\ntarget={}\nbackup=\"${{target}}.old\"\nrm -rf -- \"$backup\"\nif [ -e \"$target\" ]; then mv -- \"$target\" \"$backup\"; fi\nif ! ditto \"$replacement\" \"$target\"; then if [ -e \"$backup\" ]; then mv -- \"$backup\" \"$target\"; fi; exit 1; fi\nif ! \"$target/Contents/MacOS/wavelength\" --install-services; then rm -rf -- \"$target\"; if [ -e \"$backup\" ]; then mv -- \"$backup\" \"$target\"; fi; exit 1; fi\nopen \"$target\"\nrm -rf -- \"$backup\"\nrm -rf -- {}\n",
+        "#!/bin/sh\nset -eu\nwhile kill -0 {} 2>/dev/null; do sleep 0.25; done\nreplacement={}\ntarget={}\nbackup=\"${{target}}.old\"\nrm -rf -- \"$backup\"\nif [ -e \"$target\" ]; then mv -- \"$target\" \"$backup\"; fi\nif ! ditto \"$replacement\" \"$target\"; then if [ -e \"$backup\" ]; then mv -- \"$backup\" \"$target\"; fi; exit 1; fi\nconsole_user=$(stat -f %Su /dev/console)\nif [ \"$console_user\" != root ]; then launchctl asuser \"$(id -u \"$console_user\")\" /usr/bin/open \"$target\"; fi\nrm -rf -- \"$backup\"\nrm -rf -- {}\n",
         std::process::id(),
         shell_quote(&replacement.to_string_lossy()),
         shell_quote(&installed_app.to_string_lossy()),
@@ -1667,7 +2028,46 @@ fn install_macos_update(bytes: Vec<u8>) -> Result<(), String> {
     Ok(())
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(target_os = "linux")]
+fn install_linux_update(bytes: Vec<u8>) -> Result<(), String> {
+    let appimage = env::var_os("APPIMAGE")
+        .map(PathBuf::from)
+        .ok_or_else(|| "The running AppImage path is unavailable.".to_string())?;
+    let appimage = fs::canonicalize(appimage)
+        .map_err(|error| format!("Could not locate the installed AppImage: {error}"))?;
+    let parent = appimage
+        .parent()
+        .ok_or_else(|| "The installed AppImage directory is unavailable.".to_string())?;
+    let staging_dir = parent.join(format!(".wavelength-update-{}", std::process::id()));
+    fs::create_dir_all(&staging_dir)
+        .map_err(|error| format!("Could not prepare the update directory: {error}"))?;
+    let replacement = staging_dir.join("Wavelength.AppImage");
+    fs::write(&replacement, bytes)
+        .map_err(|error| format!("Could not save the verified AppImage update: {error}"))?;
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&replacement, fs::Permissions::from_mode(0o755))
+        .map_err(|error| format!("Could not make the updated AppImage executable: {error}"))?;
+    let script_path = staging_dir.join("install-update.sh");
+    let script = format!(
+        "#!/bin/sh\nset -eu\nwhile kill -0 {} 2>/dev/null; do sleep 0.25; done\nreplacement={}\ntarget={}\nstaging={}\nbackup=\"$staging/previous.AppImage\"\nif ! mv -- \"$target\" \"$backup\"; then exit 1; fi\nif ! mv -- \"$replacement\" \"$target\"; then mv -- \"$backup\" \"$target\"; exit 1; fi\nif ! chmod +x \"$target\"; then rm -f -- \"$target\"; mv -- \"$backup\" \"$target\"; exit 1; fi\n\"$target\" >/dev/null 2>&1 &\nrm -rf -- \"$staging\"\n",
+        std::process::id(),
+        shell_quote(&replacement.to_string_lossy()),
+        shell_quote(&appimage.to_string_lossy()),
+        shell_quote(&staging_dir.to_string_lossy())
+    );
+    fs::write(&script_path, script)
+        .map_err(|error| format!("Could not prepare the AppImage update installer: {error}"))?;
+    Command::new("sh")
+        .arg(&script_path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|error| format!("Could not launch the AppImage update installer: {error}"))?;
+    Ok(())
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
@@ -1675,4 +2075,142 @@ fn shell_quote(value: &str) -> String {
 #[cfg(target_os = "macos")]
 fn applescript_quote(value: &str) -> String {
     format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        extract_service_package, local_audio_protocol_url, parse_service_install_arguments,
+        verify_service_package_hash,
+    };
+    use sha2::{Digest, Sha256};
+    use std::{
+        fs,
+        io::Write,
+        path::PathBuf,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+    use zip::write::SimpleFileOptions;
+
+    fn test_directory(name: &str) -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("wavelength-{name}-{}-{nonce}", std::process::id()))
+    }
+
+    #[test]
+    fn local_audio_uses_the_platform_protocol_url() {
+        #[cfg(target_os = "windows")]
+        assert_eq!(
+            local_audio_protocol_url("0123abcd"),
+            "http://wavelength-audio.localhost/0123abcd"
+        );
+
+        #[cfg(not(target_os = "windows"))]
+        assert_eq!(
+            local_audio_protocol_url("0123abcd"),
+            "wavelength-audio://localhost/0123abcd"
+        );
+    }
+
+    #[test]
+    fn service_archive_extraction_rejects_parent_paths() {
+        let directory = test_directory("unsafe-service-archive");
+        fs::create_dir_all(&directory).unwrap();
+        let archive_path = directory.join("services.zip");
+        let file = fs::File::create(&archive_path).unwrap();
+        let mut archive = zip::ZipWriter::new(file);
+        archive
+            .start_file("../outside", SimpleFileOptions::default())
+            .unwrap();
+        archive.write_all(b"unsafe").unwrap();
+        archive.finish().unwrap();
+
+        let result = extract_service_package(&archive_path, &directory.join("services"));
+        assert!(result.unwrap_err().contains("unsafe path"));
+        assert!(!directory.join("outside").exists());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn service_archive_extraction_preserves_executable_files() {
+        let directory = test_directory("service-archive");
+        fs::create_dir_all(&directory).unwrap();
+        let archive_path = directory.join("services.zip");
+        let file = fs::File::create(&archive_path).unwrap();
+        let mut archive = zip::ZipWriter::new(file);
+        let executable_options = SimpleFileOptions::default().unix_permissions(0o755);
+        archive
+            .start_file("api/WavelengthLocalService", executable_options)
+            .unwrap();
+        archive.write_all(b"service").unwrap();
+        archive
+            .start_file("runtime/node", executable_options)
+            .unwrap();
+        archive.write_all(b"node").unwrap();
+        archive.finish().unwrap();
+
+        let destination = directory.join("services");
+        extract_service_package(&archive_path, &destination).unwrap();
+        assert_eq!(
+            fs::read(destination.join("api/WavelengthLocalService")).unwrap(),
+            b"service"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(destination.join("runtime/node"))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_ne!(mode & 0o111, 0);
+        }
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn service_archive_hash_must_match_the_embedded_checksum() {
+        let directory = test_directory("service-archive-hash");
+        fs::create_dir_all(&directory).unwrap();
+        let archive_path = directory.join("services.zip");
+        fs::write(&archive_path, b"compiled services").unwrap();
+        let expected = format!("{:x}", Sha256::digest(b"compiled services"));
+
+        assert!(verify_service_package_hash(&archive_path, &expected).is_ok());
+        assert!(
+            verify_service_package_hash(&archive_path, &"0".repeat(64))
+                .unwrap_err()
+                .contains("SHA-256")
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn installer_arguments_accept_a_local_service_archive() {
+        let arguments = [
+            std::ffi::OsString::from("--archive"),
+            std::ffi::OsString::from(r"C:\packages\services.zip"),
+            std::ffi::OsString::from("--system"),
+        ];
+
+        let (system_install, archive) = parse_service_install_arguments(&arguments).unwrap();
+        assert!(system_install);
+        assert_eq!(
+            archive,
+            Some(PathBuf::from(r"C:\packages\services.zip"))
+        );
+    }
+
+    #[test]
+    fn installer_arguments_reject_a_missing_archive_path() {
+        let arguments = [std::ffi::OsString::from("--archive")];
+
+        assert!(
+            parse_service_install_arguments(&arguments)
+                .unwrap_err()
+                .contains("path after --archive")
+        );
+    }
 }

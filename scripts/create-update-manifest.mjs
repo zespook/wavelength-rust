@@ -7,7 +7,12 @@ import { fileURLToPath } from "node:url";
 const scriptDir = fileURLToPath(new URL(".", import.meta.url));
 const [version, ...assetSpecs] = process.argv.slice(2);
 const repository = process.env.GITHUB_REPOSITORY;
-const supportedPlatforms = new Set(["windows-x86_64", "darwin-x86_64", "darwin-aarch64"]);
+const supportedPlatforms = new Set([
+  "windows-x86_64",
+  "linux-x86_64",
+  "darwin-x86_64",
+  "darwin-aarch64",
+]);
 
 if (!/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(version ?? "")) {
   throw new Error("Provide a semantic release version.");

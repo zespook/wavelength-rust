@@ -17,7 +17,7 @@ pub(super) fn SpotifyPlaylistsPage(data: std::rc::Rc<PageData>) -> Element {
                 button { class: "outline-button compact-action", disabled: (app_state.spotify_playlists_busy)(), onclick: move |_| load_spotify_playlists(app_state.spotify_playlists, app_state.spotify_playlists_busy, app_state.notice), "Refresh" }
             }
             if (app_state.spotify_playlists_busy)() { p { class: "library-empty", "Loading Spotify playlists…" } }
-            else if (app_state.spotify_playlists)().is_empty() { p { class: "library-empty", "No Spotify playlists loaded yet." } }
+            else if (app_state.spotify_playlists)().is_empty() { p { class: "library-empty", "No Spotify playlists loaded yet" } }
             div { class: "collection-grid",
                 for playlist in (app_state.spotify_playlists)() {
                     article { class: "collection-card", key: "{playlist.id}",

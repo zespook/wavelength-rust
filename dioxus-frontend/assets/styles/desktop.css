@@ -1,11 +1,3 @@
-:root {
-  --sidebar-width: clamp(200px, 18vw, 248px);
-  --player-height: clamp(80px, 4.375vw, 84px);
-  --rail-width: 320px;
-  --page-content-width: 1200px;
-  --page-frame-width: 1440px;
-}
-
 .app-shell.sidebar-collapsed .sidebar {
   width: var(--sidebar-compact);
   padding: var(--space-4) var(--space-2);
@@ -19,12 +11,6 @@
 
 .app-shell.sidebar-collapsed .sidebar nav button span {
   display: none;
-}
-
-.app-shell:not(.queue-closed) {
-  --page-content-width: 1000px;
-  --page-frame-width: 1120px;
-  --page-gutter: clamp(20px, 2.5vw, 24px);
 }
 
 .player-bar {
@@ -63,7 +49,7 @@
 
 .playlists-toolbar {
   display: grid;
-  grid-template-columns: minmax(240px, 1fr) auto auto;
+  grid-template-columns: minmax(240px, 1fr) auto;
   align-items: center;
   gap: var(--space-2);
 }
@@ -80,10 +66,11 @@
 
 @media (min-width: 750px) and (max-width: 1184px) {
   .playlists-toolbar {
-    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-columns: minmax(0, 1fr);
   }
 
-  .playlists-toolbar .playlist-search {
+  .playlists-toolbar .playlist-search,
+  .playlists-toolbar .playlist-toolbar-actions {
     grid-column: 1 / -1;
   }
 
@@ -91,6 +78,17 @@
   .party-room-end-action {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  @media (max-width: 749px) {
+    .playlists-toolbar {
+      grid-template-columns: minmax(0, 1fr);
+    }
+
+    .playlists-toolbar .playlist-search,
+    .playlists-toolbar .playlist-toolbar-actions {
+      grid-column: 1 / -1;
+    }
   }
 
   .party-room-form-actions > button,
@@ -204,15 +202,13 @@
   }
 }
 
-@container page-area (max-width: 560px) {
+@container page-area (max-width: 1000px) {
   .content-inner.page-settings .settings-dashboard {
     column-count: 1;
   }
+}
 
-  .content-inner.page-settings .settings-card-wide {
-    column-span: none;
-  }
-
+@container page-area (max-width: 560px) {
   .content-inner.page-home .home-hero {
     grid-template-columns: minmax(0, 1fr);
     align-items: start;
@@ -438,7 +434,7 @@
   }
 
   .content-inner.page-equalizer .equalizer-page-heading p {
-    font-size: calc(11px * var(--font-size-scale, 1));
+    font-size: calc(12px * var(--font-size-scale, 1));
     line-height: 1.3;
   }
 
@@ -473,7 +469,7 @@
 
   .content-inner.page-equalizer .equalizer-save-form {
     flex: 1 1 100%;
-    gap: 6px;
+    gap: 8px;
     width: 100%;
   }
 
@@ -494,23 +490,23 @@
   }
 
   .content-inner.page-equalizer .equalizer-graph-hint {
-    padding: 6px 8px;
-    font-size: calc(11px * var(--font-size-scale, 1));
+    padding: 8px;
+    font-size: calc(12px * var(--font-size-scale, 1));
   }
 
   .content-inner.page-equalizer .equalizer-band-strip {
-    gap: 6px;
+    gap: 8px;
   }
 
   .content-inner.page-equalizer .equalizer-band-tab {
     flex-basis: 68px;
     min-height: 52px;
-    padding: 6px;
+    padding: 8px;
   }
 
   .content-inner.page-equalizer .equalizer-band-editor {
-    gap: 10px;
-    padding: 10px;
+    gap: 8px;
+    padding: 8px;
   }
 }
 

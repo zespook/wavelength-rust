@@ -52,7 +52,8 @@ npm run desktop:build
 
 The Windows installer is written to `dist/desktop/`. See [DESKTOP.md](./DESKTOP.md) for additional desktop and deployment details.
 
-On macOS, run `npm run desktop:build:unix` to package the local services for the host OS and build its desktop bundle.
+On macOS or Linux, run `npm run desktop:build:unix` to build the host platform's desktop bundle.
+Local desktop builds also write a matching compiled-services ZIP under `dist/release-assets/`; keep it there until the local installer has finished installing the services.
 
 ## Connect Spotify directly
 
@@ -60,7 +61,9 @@ Spotify can be connected without the self-hosted room server or per-user setup. 
 
 ## Release versions
 
-Push a semantic version tag such as `v1.2.3` to build a desktop release. The tag must match the version in `dioxus-frontend/Cargo.toml`. The release workflow builds native Dioxus bundles and publishes signed updater packages for Windows and macOS.
+Push a semantic version tag such as `v1.2.3` to build a desktop release. The tag must match the version in `dioxus-frontend/Cargo.toml`. Each release publishes small main installers and a separate, platform-specific ZIP containing the compiled local services. Windows and macOS installers download and verify that ZIP during installation. Linux `.deb` and `.rpm` packages do the same from their install hooks; an AppImage downloads it on first launch. Users do not need Python or Node.js installed. The AppImage, `.deb`, and `.rpm` are all published for Linux.
+
+The Linux AppImage is intended to be the broadest single-file Linux option, but no one package works on literally every distribution: host graphics/WebKit libraries and Linux ABI compatibility still apply. An internet connection is required when the compiled services are first installed.
 
 ## Run the self-hosted server with Docker
 
@@ -131,4 +134,4 @@ docker run -d \
   wavelength-rooms-api
 ```
 
-The server API is available at `http://localhost:5050`; it does not host the app UI. Enter that address in the app's Settings for same-device use, or use an HTTPS reverse proxy for remote clients. View server logs with `docker logs -f wavelength-rooms-api`. To stop the containers, run `docker stop wavelength-rooms-api wavelength-mongodb`. The persistent volumes remain so room data is preserved.
+The server API is available at `http://localhost:5050`; it does not host the app UI. Enter that address in the app's Settings for same-device use, or use an HTTPS reverse proxy for remote clients. The local Dioxus origins on port `8080` are allowed by default. For a deployed web app, set `FRONTEND_URL` in the room server's `.env` to its exact HTTPS origin without a path, then restart the server. View server logs with `docker logs -f wavelength-rooms-api`. To stop the containers, run `docker stop wavelength-rooms-api wavelength-mongodb`. The persistent volumes remain so room data is preserved.

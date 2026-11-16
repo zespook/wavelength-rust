@@ -85,6 +85,7 @@ pub(crate) fn TrackList(
 pub(crate) fn TrackRow(
     track: Track,
     #[props(default)] context_menu_only: bool,
+    #[props(default)] is_current: bool,
     #[props(default)] history_actions: bool,
     #[props(default)] favorite_active: bool,
     #[props(default)] show_add_to_playlist: bool,
@@ -131,8 +132,20 @@ pub(crate) fn TrackRow(
     } else {
         "favorite"
     };
+    let row_class = if history_actions {
+        "track-row history-track-row"
+    } else if context_menu_only {
+        "track-row context-menu-only"
+    } else {
+        "track-row"
+    };
+    let row_class = if is_current {
+        format!("{row_class} now-playing")
+    } else {
+        row_class.to_string()
+    };
     rsx! {
-        article { class: if history_actions { "track-row history-track-row" } else if context_menu_only { "track-row context-menu-only" } else { "track-row" },
+        article { class: "{row_class}",
             oncontextmenu: move |event| {
                 event.prevent_default();
                 let position = event.client_coordinates();
@@ -144,6 +157,13 @@ pub(crate) fn TrackRow(
             },
             button { class: "track-select", aria_label: "Play {title}", onclick: move |_| on_play.call(select_track.clone()),
                 span { class: "track-name",
+                    if is_current {
+                        span { class: "track-playing-waveform", role: "img", aria_label: "Now playing",
+                            i {}
+                            i {}
+                            i {}
+                        }
+                    }
                     span { class: "mini-art",
                         if let Some(image) = track.thumbnail.as_deref() {
                             img { src: "{image}", alt: "" }

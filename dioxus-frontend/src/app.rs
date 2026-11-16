@@ -47,6 +47,7 @@ struct AppState {
     playlist_create_open: Signal<bool>,
     playlist_create_favorites: Signal<Vec<String>>,
     playlist_query: Signal<String>,
+    playlist_list_view: Signal<bool>,
     selected_playlist_id: Signal<Option<String>>,
     playlist_add_target: Signal<Option<String>>,
     album_detail_name: Signal<Option<String>>,
@@ -172,10 +173,11 @@ pub(crate) fn App() -> Element {
     let mut playlist_name = use_signal(String::new);
     let mut playlist_create_open = use_signal(|| false);
     let mut playlist_create_favorites = use_signal(Vec::<String>::new);
-    let playlist_query = use_signal(String::new);
+    let mut playlist_query = use_signal(String::new);
+    let playlist_list_view = use_signal(|| false);
     let mut selected_playlist_id = use_signal(|| Option::<String>::None);
     let mut playlist_add_target = use_signal(|| Option::<String>::None);
-    let album_detail_name = use_signal(|| Option::<String>::None);
+    let mut album_detail_name = use_signal(|| Option::<String>::None);
     let mut folder_manager_open = use_signal(|| false);
     let mut saved_folder_names = use_signal(Vec::<String>::new);
     let download_folder_name = use_signal(String::new);
@@ -294,6 +296,7 @@ pub(crate) fn App() -> Element {
         playlist_create_open,
         playlist_create_favorites,
         playlist_query,
+        playlist_list_view,
         selected_playlist_id,
         playlist_add_target,
         album_detail_name,
@@ -442,14 +445,9 @@ pub(crate) fn App() -> Element {
         }
     });
 
-    use_effect(move || {
-        match browser::is_desktop_window() {
-            Ok(available) => window_controls_available.set(available),
-            Err(error) => notice.set(error),
-        }
-        if let Err(error) = browser::install_window_dragging() {
-            notice.set(error);
-        }
+    use_effect(move || match browser::is_desktop_window() {
+        Ok(available) => window_controls_available.set(available),
+        Err(error) => notice.set(error),
     });
 
     use_effect(move || {
@@ -506,12 +504,18 @@ pub(crate) fn App() -> Element {
         spawn(async move {
             let mut poll_delay_ms = 2500;
             loop {
-                let track_ids = queue()
+                let mut track_ids = queue()
                     .iter()
                     .filter(|track| !track.is_local())
-                    .map(|track| track.key().to_string())
+                    .map(|track| track.audio_service_id())
                     .filter(|id| !id.is_empty())
                     .collect::<Vec<_>>();
+                if let Some(track) = current().filter(|track| !track.is_local()) {
+                    let id = track.audio_service_id();
+                    if !id.is_empty() && !track_ids.contains(&id) {
+                        track_ids.push(id);
+                    }
+                }
                 if track_ids.is_empty() {
                     queue_download_status.set(std::collections::HashMap::new());
                     queue_download_error.set(String::new());
@@ -528,6 +532,10 @@ pub(crate) fn App() -> Element {
                             poll_delay_ms = (poll_delay_ms * 2).min(30_000);
                         }
                     }
+                }
+                if page() == Page::Activity {
+                    load_activity(activity_logs, activity_loading, activity_error);
+                    poll_delay_ms = poll_delay_ms.min(5000);
                 }
                 crate::sleep_ms(poll_delay_ms as u64).await;
             }
@@ -552,6 +560,7 @@ pub(crate) fn App() -> Element {
         load_saved("wavelength-previous-volume", previous_volume, notice);
         load_saved("wavelength-room-url", room_url, notice);
         room_url_input.set(room_url());
+        load_room_server_passcode(room_passcode, notice);
         load_saved("wavelength-room-access", room_access, notice);
         load_saved("wavelength-party-code", active_room_code, notice);
         load_saved("wavelength-party-role", room_role, notice);
@@ -982,8 +991,8 @@ pub(crate) fn App() -> Element {
     };
 
     rsx! {
-        document::Link { rel: "stylesheet", href: "/styles/minimal.css" }
-        document::Link { rel: "stylesheet", href: "/styles/desktop.css" }
+        document::Link { rel: "stylesheet", href: asset!("/assets/styles/minimal.css") }
+        document::Link { rel: "stylesheet", href: asset!("/assets/styles/desktop.css") }
         div {
             id: "app",
             class: match (room_panel_open() || queue_panel_open(), sidebar_collapsed()) {
@@ -1002,10 +1011,19 @@ pub(crate) fn App() -> Element {
                     dragging_queue_item.set(None);
                 }
             },
-            header { class: "topbar",
+            header {
+                class: "topbar",
+                onmousedown: move |event| {
+                    if event.data.trigger_button() == Some(MouseButton::Primary) {
+                        browser::drag_window();
+                    }
+                },
                 div { class: "topbar-start",
-                    img { class: "topbar-brand-mark", src: "/images/icon.svg", alt: "Wavelength" }
-                    div { class: "topbar-navigation", aria_label: "Page navigation",
+                    img { class: "topbar-brand-mark", src: asset!("/assets/images/icon.svg"), alt: "Wavelength" }
+                    div {
+                        class: "topbar-navigation",
+                        aria_label: "Page navigation",
+                        onmousedown: move |event| event.stop_propagation(),
                         button {
                             class: "topbar-navigation-button",
                             r#type: "button",
@@ -1031,6 +1049,7 @@ pub(crate) fn App() -> Element {
                         form {
                             class: "topbar-search",
                             role: "search",
+                            onmousedown: move |event| event.stop_propagation(),
                             onsubmit: move |event| {
                                 event.prevent_default();
                                 topbar_search_open.set(false);
@@ -1132,6 +1151,7 @@ pub(crate) fn App() -> Element {
                         class: "avatar",
                         aria_label: "Settings",
                         title: "Settings",
+                        onmousedown: move |event| event.stop_propagation(),
                         onclick: move |_| {
                             room_panel_open.set(false);
                             queue_panel_open.set(false);
@@ -1151,7 +1171,11 @@ pub(crate) fn App() -> Element {
                         }
                     }
                     if window_controls_available() {
-                        div { class: "window-controls", role: "group", aria_label: "Window controls",
+                        div {
+                            class: "window-controls",
+                            role: "group",
+                            aria_label: "Window controls",
+                            onmousedown: move |event| event.stop_propagation(),
                             button {
                                 class: "window-control",
                                 r#type: "button",
@@ -1203,8 +1227,8 @@ pub(crate) fn App() -> Element {
                     nav { aria_label: "Main navigation",
                         for item in [
                             (Page::Home, "Home", "home"),
-                            (Page::Playlists, "Playlists", "list"),
-                            (Page::Library, "Local library", "library"),
+                            (Page::Playlists, "Library", "library"),
+                            (Page::Library, "Local files", "folder"),
                             (Page::History, "Listening history", "history"),
                         ] {
                             button {
@@ -1265,7 +1289,7 @@ pub(crate) fn App() -> Element {
                 main { class: "content",
                     section { class: "content-inner page-layout {page().class()}", aria_label: "Page content",
                         pages::PageContent {}
-                        AppNotice { notice }
+                        AppNotice { notice, notification_logs }
                         if let Some(update) = update_available() {
                             UpdateNotice {
                                 update,
@@ -1307,7 +1331,7 @@ pub(crate) fn App() -> Element {
                             }
                         }
                         if queue().is_empty() {
-                            p { class: "rail-empty", "Your queue is ready for its next song." }
+                            p { class: "rail-empty", "Add tracks to play them next" }
                         } else {
                             div { class: "rail-queue-list",
                                 for (index, track) in queue().iter().cloned().enumerate() {
@@ -1371,7 +1395,7 @@ pub(crate) fn App() -> Element {
                                             } else {
                                                 Icon { name: "disc" }
                                             }
-                                            if let Some(status) = queue_download_status().get(track.key()).cloned() {
+                                            if let Some(status) = queue_download_status().get(&track.audio_service_id()).cloned() {
                                                 QueueDownloadIndicator { status }
                                             }
                                         }
@@ -1605,7 +1629,9 @@ pub(crate) fn App() -> Element {
                         notice,
                     ),
                     onerror: move |_| {
-                        if current().is_some() { notice.set("The audio stream could not be played.".to_string()); }
+                        if current().is_some() && notice().is_empty() {
+                            notice.set("The audio stream could not be played.".to_string());
+                        }
                     },
                 }
                 div { class: "player-identity",
@@ -1614,11 +1640,18 @@ pub(crate) fn App() -> Element {
                         disabled: active_track.is_none(),
                         aria_label: if active_track.is_some() { "Open now playing" } else { "Nothing playing" },
                         onclick: move |_| page.set(Page::NowPlaying),
-                        div { class: "player-art", if let Some(track) = active_track.as_ref() {
-                            if let Some(image) = track.thumbnail.as_ref() {
-                                img { src: "{image}", alt: "" }
-                            } else { Icon { name: "disc" } }
-                        } else { Icon { name: "disc" } } }
+                        div { class: "player-art",
+                            if let Some(track) = active_track.as_ref() {
+                                if let Some(image) = track.thumbnail.as_ref() {
+                                    img { src: "{image}", alt: "" }
+                                } else { Icon { name: "disc" } }
+                                if let Some(status) = queue_download_status().get(&track.audio_service_id()).cloned() {
+                                    QueueDownloadIndicator { status }
+                                }
+                            } else {
+                                Icon { name: "disc" }
+                            }
+                        }
                         div { class: "player-track",
                             strong { "{active_track.as_ref().map(|track| track.title.as_str()).unwrap_or(\"Nothing playing\")}" }
                             small { "{player_track_caption}" }
@@ -1827,6 +1860,7 @@ pub(crate) fn App() -> Element {
                                     playlists.set(all);
                                     playlist_name.set(String::new());
                                     playlist_create_favorites.set(Vec::new());
+                                    playlist_query.set(String::new());
                                     playlist_create_open.set(false);
                                     notice.set(format!("{name} created with {track_count} songs."));
                                 }
@@ -2069,7 +2103,6 @@ pub(crate) fn App() -> Element {
                                     {
                                         let track = menu.track.clone();
                                         let details_target = track.clone();
-                                        let create_target = track.clone();
                                         let queue_target = track.clone();
                                         let favorite_target = track.clone();
                                         let download_target = track.clone();
@@ -2098,18 +2131,6 @@ pub(crate) fn App() -> Element {
                                             }, "Add to {playlist.name}" }
                                         }
                                         button { onclick: move |_| {
-                                            let playlist = Playlist {
-                                                id: format!("playlist-{}", crate::now_epoch_millis()),
-                                                name: create_target.title.clone(),
-                                                tracks: vec![create_target.clone()],
-                                            };
-                                            let mut all = playlists();
-                                            all.push(playlist);
-                                            playlists.set(all.clone());
-                                            save_saved("wavelength-playlists", &all, notice);
-                                            context_track.set(None);
-                                        }, "Create playlist from track" }
-                                        button { onclick: move |_| {
                                             add_to_queue(queue_target.clone(), queue, notice);
                                             context_track.set(None);
                                         }, "Add to queue" }
@@ -2134,18 +2155,74 @@ pub(crate) fn App() -> Element {
                                             div {
                                                 class: "context-menu",
                                                 role: "menu",
-                                                aria_label: "Playlist actions",
+                                                aria_label: "Collection actions",
                                                 style: "--context-menu-x: {menu.x}px; --context-menu-y: {menu.y}px;",
                                                 match target {
-                                                    PlaylistMenuTarget::Favorites => rsx! {
-                                                        button { onclick: move |_| {
-                                                            playlist_name.set(String::new());
-                                                            playlist_create_favorites.set(
-                                                                favorites().iter().map(|track| track.key().to_string()).collect()
-                                                            );
-                                                            playlist_create_open.set(true);
-                                                            context_playlist.set(None);
-                                                        }, "Create playlist from favorites" }
+                                                    PlaylistMenuTarget::Favorites => {
+                                                        let favorite_tracks = favorites();
+                                                        let has_tracks = !favorite_tracks.is_empty();
+                                                        let play_tracks = favorite_tracks.clone();
+                                                        let queue_tracks = favorite_tracks;
+                                                        rsx! {
+                                                            button { disabled: !has_tracks, onclick: move |_| {
+                                                                play_playlist_tracks(
+                                                                    play_tracks.clone(),
+                                                                    current,
+                                                                    audio_src,
+                                                                    playing,
+                                                                    queue,
+                                                                    history,
+                                                                    notice,
+                                                                    page,
+                                                                );
+                                                                context_playlist.set(None);
+                                                            }, "Play favorites" }
+                                                            button { disabled: !has_tracks, onclick: move |_| {
+                                                                for track in queue_tracks.clone() {
+                                                                    add_to_queue(track, queue, notice);
+                                                                }
+                                                                context_playlist.set(None);
+                                                            }, "Add favorites to queue" }
+                                                        }
+                                                    },
+                                                    PlaylistMenuTarget::Album { name, tracks } => {
+                                                        let album_name = name.clone();
+                                                        let play_tracks = tracks.clone();
+                                                        let queue_tracks = tracks.clone();
+                                                        let favorite_tracks = tracks.clone();
+                                                        let has_tracks = !tracks.is_empty();
+                                                        rsx! {
+                                                            button { onclick: move |_| {
+                                                                album_detail_name.set(Some(album_name.clone()));
+                                                                page.set(Page::AlbumDetail);
+                                                                context_playlist.set(None);
+                                                            }, "Open album" }
+                                                            button { disabled: !has_tracks, onclick: move |_| {
+                                                                play_playlist_tracks(
+                                                                    play_tracks.clone(),
+                                                                    current,
+                                                                    audio_src,
+                                                                    playing,
+                                                                    queue,
+                                                                    history,
+                                                                    notice,
+                                                                    page,
+                                                                );
+                                                                context_playlist.set(None);
+                                                            }, "Play album" }
+                                                            button { disabled: !has_tracks, onclick: move |_| {
+                                                                for track in queue_tracks.clone() {
+                                                                    add_to_queue(track, queue, notice);
+                                                                }
+                                                                context_playlist.set(None);
+                                                            }, "Add album to queue" }
+                                                            button { disabled: !has_tracks, onclick: move |_| {
+                                                                for track in favorite_tracks.clone() {
+                                                                    toggle_favorite(track, favorites, notice);
+                                                                }
+                                                                context_playlist.set(None);
+                                                            }, "Toggle album track favorites" }
+                                                        }
                                                     },
                                                     PlaylistMenuTarget::Local(playlist) => rsx! {
                                                         button { onclick: {

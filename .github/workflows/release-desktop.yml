@@ -16,7 +16,8 @@ jobs:
         include:
           - runner: windows-latest
             platform: windows-x86_64
-            bundle-types: nsis
+          - runner: ubuntu-24.04
+            platform: linux-x86_64
           - runner: macos-15-intel
             platform: darwin-x86_64
           - runner: macos-latest
@@ -65,21 +66,61 @@ jobs:
           }
           Write-Host "Building Wavelength $appVersion"
 
-      - name: Package local services (Windows)
+      - name: Build and package compiled services (Windows)
         if: runner.os == 'Windows'
-        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/package-services.ps1
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          $version = $env:RELEASE_TAG.Substring(1)
+          & scripts\package-services.ps1
+          if ($LASTEXITCODE -ne 0) { throw 'Could not build the compiled services.' }
+          $artifact = Join-Path $env:GITHUB_WORKSPACE 'dist\release-assets'
+          $archive = Join-Path $artifact "Wavelength_${version}_services_windows-x86_64.zip"
+          $packageOutput = & python scripts\package-compiled-services.py dioxus-frontend\resources\services $version $archive
+          if ($LASTEXITCODE -ne 0) { throw 'Could not create the compiled services archive.' }
+          $hashLine = $packageOutput | Where-Object { $_ -match '^sha256=[0-9a-fA-F]{64}$' } | Select-Object -First 1
+          if (-not $hashLine) { throw 'Could not read the compiled service package checksum.' }
+          $hash = $hashLine.Substring(7).ToLowerInvariant()
+          "WAVELENGTH_SERVICES_SHA256=$hash" >> $env:GITHUB_ENV
 
-      - name: Package local services (macOS)
-        if: runner.os == 'macOS'
-        run: bash scripts/package-services-macos.sh
+      - name: Build and package compiled services (macOS and Linux)
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          version="${RELEASE_TAG#v}"
+          bash scripts/package-services-unix.sh
+          artifact="$GITHUB_WORKSPACE/dist/release-assets"
+          archive="$artifact/Wavelength_${version}_services_${PLATFORM}.zip"
+          python3 scripts/package-compiled-services.py \
+            dioxus-frontend/resources/services "$version" "$archive"
+          service_hash="$(sha256sum "$archive" | cut -d ' ' -f 1)"
+          echo "WAVELENGTH_SERVICES_SHA256=$service_hash" >> "$GITHUB_ENV"
+
+      - name: Install Linux desktop dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            curl \
+            desktop-file-utils \
+            libayatana-appindicator3-dev \
+            libssl-dev \
+            libwebkit2gtk-4.1-dev \
+            librsvg2-dev \
+            libxdo-dev \
+            patchelf \
+            wget
 
       - name: Build desktop bundle (Windows)
         if: runner.os == 'Windows'
         working-directory: dioxus-frontend
-        env:
-          BUNDLE_TYPES: ${{ matrix.bundle-types }}
         shell: pwsh
-        run: dx bundle --platform desktop --release --no-default-features --features desktop --package-types "$env:BUNDLE_TYPES" --out-dir "$env:GITHUB_WORKSPACE/dist/desktop"
+        run: dx bundle --platform desktop --release --no-default-features --features desktop --package-types nsis --out-dir "$env:GITHUB_WORKSPACE\dist\desktop"
 
       - name: Build desktop bundle (macOS)
         if: runner.os == 'macOS'
@@ -89,6 +130,16 @@ jobs:
           dx bundle --platform desktop --release --no-default-features --features desktop \
             --package-types macos \
             --package-types updater \
+            --out-dir "$GITHUB_WORKSPACE/dist/desktop"
+
+      - name: Build desktop bundle (Linux)
+        if: runner.os == 'Linux'
+        working-directory: dioxus-frontend
+        run: |
+          dx bundle --platform desktop --release --no-default-features --features desktop \
+            --package-types appimage \
+            --package-types deb \
+            --package-types rpm \
             --out-dir "$GITHUB_WORKSPACE/dist/desktop"
 
       - name: Collect Windows installer
@@ -104,9 +155,6 @@ jobs:
           $installer = Get-ChildItem -Path $out -Filter '*.exe' -File | Select-Object -First 1
           if (-not $installer) { throw 'Dioxus did not produce the Windows NSIS installer.' }
           Copy-Item $installer.FullName (Join-Path $artifact "Wavelength_${version}_windows_x86_64.exe")
-          $services = Join-Path $env:GITHUB_WORKSPACE 'dioxus-frontend\resources\services.zip'
-          if (-not (Test-Path $services -PathType Leaf)) { throw 'The Windows service archive is missing.' }
-          Copy-Item $services (Join-Path $artifact 'Wavelength_services_windows_x86_64.zip')
 
       - name: Collect macOS packages
         if: runner.os == 'macOS'
@@ -118,18 +166,41 @@ jobs:
           version="${RELEASE_TAG#v}"
           out="$GITHUB_WORKSPACE/dist/desktop"
           artifact="$GITHUB_WORKSPACE/dist/release-assets"
-          services="$GITHUB_WORKSPACE/dioxus-frontend/resources/services.tar.gz"
           mkdir -p "$artifact"
           app_archive="$(find "$out" -maxdepth 1 -type f -name '*.app.tar.gz' -print -quit)"
           pkg="$out/Wavelength_${version}_${PLATFORM}.pkg"
-          test -n "$app_archive" && test -f "$services" || {
-            echo "Dioxus or service packaging did not produce the expected macOS release assets." >&2
+          test -n "$app_archive" || {
+            echo "Dioxus did not produce the expected macOS release assets." >&2
             exit 1
           }
           bash scripts/package-macos-pkg.sh "$version" "$app_archive" "$pkg"
           cp "$app_archive" "$artifact/Wavelength_${version}_${PLATFORM}.app.tar.gz"
           cp "$pkg" "$artifact/Wavelength_${version}_${PLATFORM}.pkg"
-          cp "$services" "$artifact/Wavelength_services_${PLATFORM}.tar.gz"
+
+      - name: Collect Linux packages
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          version="${RELEASE_TAG#v}"
+          out="$GITHUB_WORKSPACE/dist/desktop"
+          artifact="$GITHUB_WORKSPACE/dist/release-assets"
+          mkdir -p "$artifact"
+          appimage="$(find "$out" -maxdepth 1 -type f -iname '*.AppImage' -print -quit)"
+          test -n "$appimage" || {
+            echo "Dioxus did not produce the expected Linux AppImage." >&2
+            exit 1
+          }
+          cp "$appimage" "$artifact/Wavelength_${version}_linux_x86_64.AppImage"
+          deb="$(find "$out" -type f -name '*.deb' -print -quit)"
+          rpm="$(find "$out" -type f -name '*.rpm' -print -quit)"
+          test -n "$deb" -a -n "$rpm" || {
+            echo "Dioxus did not produce both Linux package formats." >&2
+            exit 1
+          }
+          cp "$deb" "$artifact/Wavelength_${version}_linux_x86_64.deb"
+          cp "$rpm" "$artifact/Wavelength_${version}_linux_x86_64.rpm"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -162,11 +233,9 @@ jobs:
           version="${RELEASE_TAG#v}"
           node scripts/create-update-manifest.mjs "$version" \
             "windows-x86_64=dist/release-assets/Wavelength_${version}_windows_x86_64.exe" \
+            "linux-x86_64=dist/release-assets/Wavelength_${version}_linux_x86_64.AppImage" \
             "darwin-x86_64=dist/release-assets/Wavelength_${version}_darwin-x86_64.app.tar.gz" \
-            "darwin-aarch64=dist/release-assets/Wavelength_${version}_darwin-aarch64.app.tar.gz" \
-            "service-windows-x86_64=dist/release-assets/Wavelength_services_windows_x86_64.zip" \
-            "service-darwin-x86_64=dist/release-assets/Wavelength_services_darwin-x86_64.tar.gz" \
-            "service-darwin-aarch64=dist/release-assets/Wavelength_services_darwin-aarch64.tar.gz"
+            "darwin-aarch64=dist/release-assets/Wavelength_${version}_darwin-aarch64.app.tar.gz"
 
       - name: Publish desktop release
         uses: softprops/action-gh-release@v2

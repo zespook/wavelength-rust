@@ -173,7 +173,7 @@ pub(super) fn NowPlayingPage(data: std::rc::Rc<PageData>) -> Element {
                 } else {
                     div { class: "now-playing-copy",
                         h1 { "Nothing playing" }
-                        p { "Choose a track from your library or queue." }
+                        p { "Choose a track from your library or queue" }
                     }
                 }
             }

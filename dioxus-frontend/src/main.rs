@@ -70,23 +70,6 @@ pub(crate) struct UpdateInfo {
     notes: Option<String>,
 }
 
-const HOME_DEMO_RECENT: [(&str, &str, &str); 4] = [
-    ("Sample Track 01", "Demo Artist A", "2 min ago"),
-    ("Sample Track 02", "Demo Artist B", "31 min ago"),
-    ("Sample Track 03", "Demo Artist A", "Yesterday"),
-    ("Sample Track 04", "Demo Artist C", "2 days ago"),
-];
-const HOME_DEMO_ARTISTS: [(&str, u64); 3] = [
-    ("Demo Artist A", 18),
-    ("Demo Artist B", 11),
-    ("Demo Artist C", 7),
-];
-const HOME_DEMO_TRACKS: [(&str, u64); 3] = [
-    ("Sample Track 01", 12),
-    ("Sample Track 02", 9),
-    ("Sample Track 03", 6),
-];
-
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Page {
     Home,
@@ -202,6 +185,23 @@ impl Track {
             self.video_id.as_deref().unwrap_or_default()
         } else {
             &self.id
+        }
+    }
+
+    fn audio_service_id(&self) -> String {
+        let key = self.key();
+        if key.is_empty() {
+            return String::new();
+        }
+        if self
+            .source
+            .as_deref()
+            .is_some_and(|source| source.eq_ignore_ascii_case("youtube"))
+            && !key.starts_with("yt-")
+        {
+            format!("yt-{key}")
+        } else {
+            key.to_string()
         }
     }
 
@@ -528,6 +528,13 @@ fn playlist_matches(query: &str, name: &str) -> bool {
     query.is_empty() || name.to_lowercase().contains(&query.to_lowercase())
 }
 
+fn album_matches(query: &str, name: &str, tracks: &[Track]) -> bool {
+    playlist_matches(query, name)
+        || tracks
+            .iter()
+            .any(|track| playlist_matches(query, &track.artist))
+}
+
 fn selected_favorite_tracks(favorites: &[Track], selected_keys: &[String]) -> Vec<Track> {
     favorites
         .iter()
@@ -569,6 +576,10 @@ struct SpotifyPlaylist {
 #[derive(Clone, Debug, PartialEq)]
 enum PlaylistMenuTarget {
     Favorites,
+    Album {
+        name: String,
+        tracks: Vec<Track>,
+    },
     Local(Playlist),
     Shared(RoomSharedPlaylist),
     Spotify(SpotifyPlaylist),
@@ -682,12 +693,29 @@ struct ActivityLogsResponse {
     logs: Vec<ActivityLog>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 struct NotificationLog {
     #[serde(default)]
     timestamp: serde_json::Value,
     #[serde(default)]
     message: String,
+}
+
+fn record_notification(mut logs: Signal<Vec<NotificationLog>>, message: &str) {
+    let saved_logs = logs.with_mut(|entries| {
+        entries.insert(
+            0,
+            NotificationLog {
+                timestamp: serde_json::json!(now_epoch_millis()),
+                message: message.to_string(),
+            },
+        );
+        entries.truncate(200);
+        entries.clone()
+    });
+    if let Err(error) = browser::save("wavelength-notification-logs", &saved_logs) {
+        eprintln!("Could not save notification activity: {error}");
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -1215,6 +1243,14 @@ fn load_saved<T: for<'de> Deserialize<'de> + 'static>(
     }
 }
 
+fn load_room_server_passcode(mut passcode: Signal<String>, mut notice: Signal<String>) {
+    match browser::room_server_passcode() {
+        Ok(Some(saved)) => passcode.set(saved),
+        Ok(None) => {}
+        Err(error) => notice.set(error),
+    }
+}
+
 fn load_accessibility_font_scale(mut scale: Signal<f64>, mut notice: Signal<String>) {
     match browser::load::<f64>("wavelength-font-scale") {
         Ok(Some(value)) if value.is_finite() && (0.8..=1.3).contains(&value) => scale.set(value),
@@ -1501,6 +1537,7 @@ fn play_track_direct(
     mut notice: Signal<String>,
 ) {
     let track_id = track.key().to_string();
+    let audio_service_id = track.audio_service_id();
     let is_local = track.is_local();
     let shared_audio_id = track.audio_id.clone();
     let track_for_history = track.clone();
@@ -1515,14 +1552,15 @@ fn play_track_direct(
             browser::audio_service_base().map(|base| {
                 format!(
                     "{base}/stream/{}?code=solo&scope=permanent",
-                    encode_uri_component(&track_id)
+                    encode_uri_component(&audio_service_id)
                 )
             })
         };
         match source {
             Ok(url) => {
-                audio_src.set(url);
-                if let Err(error) = browser::play() {
+                audio_src.set(url.clone());
+                notice.set(String::new());
+                if let Err(error) = browser::play_source(&url).await {
                     notice.set(error);
                 } else {
                     playing.set(true);
@@ -1955,7 +1993,7 @@ fn previous_track(
 }
 
 fn download_track(track: Track, mut notice: Signal<String>) {
-    let id = track.key().to_string();
+    let id = track.audio_service_id();
     let filename = format!("{} - {}", track.artist, track.title);
     spawn(async move {
         match browser::download(&id, &filename).await {
@@ -2131,7 +2169,7 @@ fn save_room_server_url(
 fn connect_room(
     room_url_input: Signal<String>,
     room_url: Signal<String>,
-    mut passcode: Signal<String>,
+    passcode: Signal<String>,
     mut access: Signal<String>,
     mut connecting: Signal<bool>,
     active_room_code: Signal<String>,
@@ -2156,6 +2194,10 @@ fn connect_room(
     }
 
     let passcode_value = passcode();
+    if let Err(error) = browser::set_room_server_passcode(Some(&passcode_value)) {
+        notice.set(error);
+        return;
+    }
     connecting.set(true);
     notice.set(String::new());
     spawn(async move {
@@ -2172,7 +2214,6 @@ fn connect_room(
             Ok(result) => match browser::save("wavelength-room-access", &result.token) {
                 Ok(()) => {
                     access.set(result.token);
-                    passcode.set(String::new());
                     notice.set("Room server connected.".to_string());
                 }
                 Err(error) => notice.set(error),
@@ -2185,7 +2226,6 @@ fn connect_room(
 
 fn disconnect_room(
     mut access: Signal<String>,
-    mut passcode: Signal<String>,
     active_room_code: Signal<String>,
     mut notice: Signal<String>,
 ) {
@@ -2196,7 +2236,6 @@ fn disconnect_room(
     match browser::save("wavelength-room-access", "") {
         Ok(()) => {
             access.set(String::new());
-            passcode.set(String::new());
             notice.set("Disconnected from the room server.".to_string());
         }
         Err(error) => notice.set(error),
@@ -3644,7 +3683,11 @@ fn load_activity(
         match browser::get_json::<ActivityLogsResponse>(&format!("{AUDIO_SERVICE}/logs?limit=200"))
             .await
         {
-            Ok(response) => logs.set(response.logs),
+            Ok(response) => {
+                if logs() != response.logs {
+                    logs.set(response.logs);
+                }
+            }
             Err(error) => error_message.set(error),
         }
         loading.set(false);

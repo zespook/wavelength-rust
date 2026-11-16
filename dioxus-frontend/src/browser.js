@@ -32,6 +32,17 @@ export function installHoverMarquee() {
   };
   const candidateFrom = target => {
     let element = target instanceof Element ? target : target?.parentElement;
+    const card = element?.closest(".playlist-card");
+    const cardTitle = card?.querySelector(".playlist-card-info h2");
+    if (cardTitle instanceof HTMLElement) {
+      const style = getComputedStyle(cardTitle);
+      if (
+        style.textOverflow === "ellipsis" &&
+        ["hidden", "clip"].includes(style.overflowX) &&
+        cardTitle.scrollWidth > cardTitle.clientWidth + 3 &&
+        cardTitle.textContent?.trim()
+      ) return cardTitle;
+    }
     while (element && element !== document.body) {
       const style = getComputedStyle(element);
       if (
@@ -48,7 +59,7 @@ export function installHoverMarquee() {
   const start = target => {
     if (matchMedia("(prefers-reduced-motion: reduce)").matches) return;
     const element = candidateFrom(target);
-    if (!element || element === active) return;
+    if (!element || element === active || element.closest(".player-bar")) return;
     stop();
 
     const text = element.textContent.replace(/\s+/g, " ").trim();
@@ -111,9 +122,18 @@ export function installHoverMarquee() {
     if (event.pointerType !== "touch") start(event.target);
   };
   const onPointerOut = event => {
+    const activeCard = active?.closest(".playlist-card");
     if (
       active &&
-      (event.target === active || active.contains(event.target)) &&
+      (
+        event.target === active ||
+        active.contains(event.target) ||
+        (
+          event.target instanceof Node &&
+          activeCard?.contains(event.target) &&
+          !(event.relatedTarget instanceof Node && activeCard.contains(event.relatedTarget))
+        )
+      ) &&
       !(event.relatedTarget instanceof Node && active.contains(event.relatedTarget))
     ) stop();
   };
@@ -247,9 +267,6 @@ export async function installUpdate() {
 export async function windowAction() {
   throw new Error("Native window controls are unavailable.");
 }
-export function installWindowDragging() {
-  return true;
-}
 export function installAppBehaviors() {
   const root = document.documentElement;
   if (root.dataset.appBehaviorsInstalled === "true") return true;
@@ -285,7 +302,9 @@ export function installAppBehaviors() {
     event.preventDefault();
     applyScale(Math.max(0.7, Math.min(1.5, nextScale)));
   });
-  document.addEventListener("contextmenu", event => event.preventDefault(), true);
+  if (!globalThis.__WAVELENGTH_NATIVE__) {
+    document.addEventListener("contextmenu", event => event.preventDefault(), true);
+  }
   root.dataset.appBehaviorsInstalled = "true";
   return true;
 }
@@ -599,6 +618,45 @@ export function playAudio() {
   audio.play().catch(error => { throw error; });
   return true;
 }
+export async function playAudioSource(source) {
+  const audio = document.getElementById("wavelength-audio");
+  if (!audio) throw new Error("Audio player is not available.");
+  if (typeof source !== "string" || source.length === 0) {
+    throw new Error("Audio source is not available.");
+  }
+  const expectedSource = new URL(source, document.baseURI).href;
+  if (audio.src !== expectedSource) {
+    await new Promise((resolve, reject) => {
+      const observer = new MutationObserver(() => {
+        if (audio.src === expectedSource) {
+          observer.disconnect();
+          clearTimeout(timeout);
+          resolve();
+        }
+      });
+      observer.observe(audio, { attributes: true, attributeFilter: ["src"] });
+      const timeout = setTimeout(() => {
+        observer.disconnect();
+        reject(new Error("The audio source was not applied to the player."));
+      }, 5000);
+      if (audio.src === expectedSource) {
+        observer.disconnect();
+        clearTimeout(timeout);
+        resolve();
+      }
+    });
+  }
+  try {
+    await audio.play();
+  } catch (error) {
+    const mediaError = audio.error;
+    const detail = mediaError
+      ? `Media error ${mediaError.code}${mediaError.message ? `: ${mediaError.message}` : ""}`
+      : error?.message ?? String(error);
+    throw new Error(`Could not play audio: ${detail}`);
+  }
+  return true;
+}
 export function pauseAudio() {
   const audio = document.getElementById("wavelength-audio");
   if (!audio) throw new Error("Audio player is not available.");
@@ -878,9 +936,17 @@ export async function roomRequest(url, path, method, body, access, host) {
   const headers = { "Content-Type": "application/json" };
   if (access) headers["x-room-access-token"] = access;
   if (host) headers.Authorization = `Bearer ${host}`;
-  const response = await fetch(`${url.replace(/\/+$/, "")}/api${path}`, {
-    method, headers, body: JSON.stringify(body), credentials: "omit"
-  });
+  let response;
+  try {
+    response = await fetch(`${url.replace(/\/+$/, "")}/api${path}`, {
+      method, headers, body: JSON.stringify(body), credentials: "omit"
+    });
+  } catch (error) {
+    if (error instanceof TypeError) {
+      throw new Error("Could not reach the room server. Check its URL and port, confirm it is running, and make sure its CORS settings allow this app.");
+    }
+    throw error;
+  }
   let data;
   try {
     data = await response.json();
@@ -1351,4 +1417,4 @@ export function equalizerCanvasSize() {
 }
 
 
-globalThis.__WAVELENGTH_BROWSER__ = { getLocal, setLocal, removeLocal, installHoverMarquee, watchNarrowWindow, chooseAvatar, getRoomInviteCode, copyRoomCode, copyRoomInvite, setAppearance, isDesktopWindow, checkForUpdates, installUpdate, windowAction, installWindowDragging, installAppBehaviors, setFontScale, effectiveTheme, startRailResize, searchAudio, restoreSpotify, spotifyLibrary, spotifyPlaylists, spotifyPlaylistTracks, saveSpotifyPlaylist, createSpotifyPlaylist, connectSpotify, disconnectSpotify, setSpotifyRefreshToken, getSpotifyRefreshToken, playAudio, pauseAudio, seekAudio, readAudioTime, setAudioVolume, downloadAudio, savedDownloadFolderName, chooseDownloadFolder, clearDownloadFolder, savedLibraryFolders, removeSavedLibraryFolder, scanLibrary, chooseFolder, localUrl, roomRequest, requestJson, requestJsonMethod, fetchLyrics, connectRoomSocket, disconnectRoomSocket, emitRoomCommand, emitRoomPlaybackControl, emitRoomPlaybackProgress, drainRoomEvents, uploadRoomTrack, hasLocalAudioFile, roomAudioUrl, openExternalTrack, setEqualizer, startEqualizerVisualization, setEqualizerSelectedBand, setEqualizerPreview, clearEqualizerPreview, equalizerCanvasSize };
+globalThis.__WAVELENGTH_BROWSER__ = { getLocal, setLocal, removeLocal, installHoverMarquee, watchNarrowWindow, chooseAvatar, getRoomInviteCode, copyRoomCode, copyRoomInvite, setAppearance, isDesktopWindow, checkForUpdates, installUpdate, windowAction, installAppBehaviors, setFontScale, effectiveTheme, startRailResize, searchAudio, restoreSpotify, spotifyLibrary, spotifyPlaylists, spotifyPlaylistTracks, saveSpotifyPlaylist, createSpotifyPlaylist, connectSpotify, disconnectSpotify, setSpotifyRefreshToken, getSpotifyRefreshToken, playAudio, playAudioSource, pauseAudio, seekAudio, readAudioTime, setAudioVolume, downloadAudio, savedDownloadFolderName, chooseDownloadFolder, clearDownloadFolder, savedLibraryFolders, removeSavedLibraryFolder, scanLibrary, chooseFolder, localUrl, roomRequest, requestJson, requestJsonMethod, fetchLyrics, connectRoomSocket, disconnectRoomSocket, emitRoomCommand, emitRoomPlaybackControl, emitRoomPlaybackProgress, drainRoomEvents, uploadRoomTrack, hasLocalAudioFile, roomAudioUrl, openExternalTrack, setEqualizer, startEqualizerVisualization, setEqualizerSelectedBand, setEqualizerPreview, clearEqualizerPreview, equalizerCanvasSize };
