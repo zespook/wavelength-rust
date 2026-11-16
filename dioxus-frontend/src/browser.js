@@ -938,9 +938,10 @@ export async function roomRequest(url, path, method, body, access, host) {
   if (host) headers.Authorization = `Bearer ${host}`;
   let response;
   try {
-    response = await fetch(`${url.replace(/\/+$/, "")}/api${path}`, {
-      method, headers, body: JSON.stringify(body), credentials: "omit"
-    });
+    const requestMethod = method.toUpperCase();
+    const request = { method: requestMethod, headers, credentials: "omit" };
+    if (requestMethod !== "GET" && requestMethod !== "HEAD") request.body = body;
+    response = await fetch(`${url.replace(/\/+$/, "")}/api${path}`, request);
   } catch (error) {
     if (error instanceof TypeError) {
       throw new Error("Could not reach the room server. Check its URL and port, confirm it is running, and make sure its CORS settings allow this app.");

@@ -20,6 +20,8 @@ coverage.xml
 **/__tests__/
 **/*test*
 **/*spec*
+!dioxus-frontend/spec/
+!dioxus-frontend/spec/browser-room-request.spec.js
 
 # Markdown docs except README files
 *.md
