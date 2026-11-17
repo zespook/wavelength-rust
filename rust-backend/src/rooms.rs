@@ -29,6 +29,7 @@ const LEGACY_ROOM_CODE_LENGTH: usize = 12;
 const ROOM_SERVER_PASSCODE_BCRYPT_COST: u32 = 12;
 const MAX_RATE_LIMIT_CLIENTS: usize = 10_000;
 const MAX_ROOM_UPDATE_BYTES: usize = 8 * 1024 * 1024;
+const MAX_ROOM_QUEUE_TRACKS: usize = 1_000;
 const ROOM_ACCESS_TTL: Duration = Duration::from_secs(12 * 60 * 60);
 const ROOM_IDLE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const ROOM_CLEANUP_INTERVAL: Duration = Duration::from_secs(10);
@@ -279,9 +280,12 @@ fn room_command_allowed(party: &Party, command: &RoomCommand) -> bool {
             && command.track.as_ref().is_some_and(room_track_is_shareable),
         "remove-track" | "clear-queue" | "reorder-queue" => {
             party.permissions.can_manage_queue
-                && (command.action != "remove-track" || !command.track_id.is_empty())
+                && (command.action != "remove-track"
+                    || (!command.track_id.is_empty() && command.track_id.len() <= 256))
                 && (command.action != "reorder-queue"
-                    || (!command.track_id.is_empty() && command.target_index.is_some()))
+                    || (!command.track_id.is_empty()
+                        && command.track_id.len() <= 256
+                        && command.target_index.is_some()))
         }
         "play-track" => party.permissions.can_control_playback
             && command.track.as_ref().is_some_and(room_track_is_shareable),
@@ -292,6 +296,68 @@ fn room_command_allowed(party: &Party, command: &RoomCommand) -> bool {
                 && command.current_time.is_some_and(|time| {
                     time.is_finite() && (0.0..=86_400.0).contains(&time)
                 })
+        }
+        _ => false,
+    }
+}
+
+fn is_server_queue_command(command: &RoomCommand) -> bool {
+    matches!(
+        command.action.as_str(),
+        "add-track" | "remove-track" | "clear-queue" | "reorder-queue"
+    )
+}
+
+fn apply_server_queue_command(
+    party: &mut Party,
+    command: &RoomCommand,
+    username: &str,
+) -> bool {
+    match command.action.as_str() {
+        "add-track" => {
+            let Some(mut track) = command.track.clone() else {
+                return false;
+            };
+            if party.queue.len() >= MAX_ROOM_QUEUE_TRACKS
+                || party.queue.iter().any(|queued| queued.id == track.id)
+                || party.current_track_id == track.id
+            {
+                return false;
+            }
+            track.added_by = clean(username);
+            if track.status.is_empty() {
+                track.status = pending();
+            }
+            party.queue.push(track);
+            true
+        }
+        "remove-track" => {
+            let previous_len = party.queue.len();
+            party.queue.retain(|track| track.id != command.track_id);
+            party.queue.len() != previous_len
+        }
+        "clear-queue" => {
+            if party.queue.is_empty() {
+                return false;
+            }
+            party.queue.clear();
+            true
+        }
+        "reorder-queue" => {
+            let Some(source) = party.queue.iter().position(|track| track.id == command.track_id)
+            else {
+                return false;
+            };
+            let Some(target) = command.target_index.filter(|index| *index < party.queue.len())
+            else {
+                return false;
+            };
+            if source == target {
+                return false;
+            }
+            let track = party.queue.remove(source);
+            party.queue.insert(target.min(party.queue.len()), track);
+            true
         }
         _ => false,
     }
@@ -1185,6 +1251,94 @@ fn room_update_filter(room_code: &str, sync_revision: Option<i64>) -> Document {
     }
 }
 
+async fn persist_server_queue_command(
+    service: &RoomService,
+    code: &str,
+    username: &str,
+    command: &RoomCommand,
+) -> Result<Option<Party>, String> {
+    for _ in 0..3 {
+        let party = service
+            .parties()
+            .find_one(doc! { "code": normalize_code(code) })
+            .await
+            .map_err(|error| error.to_string())?;
+        let Some(mut party) = party else {
+            return Ok(None);
+        };
+        if !apply_server_queue_command(&mut party, command, username) {
+            return Ok(None);
+        }
+
+        let revision = party.sync_revision.saturating_add(1).max(now());
+        let input = UpdateInput {
+            queue: Some(party.queue),
+            playlists: None,
+            current_track_id: None,
+            is_playing: None,
+            start_epoch: None,
+            paused_at: None,
+            repeat_mode: None,
+            shuffle: None,
+            permissions: None,
+            sync_revision: Some(revision),
+        };
+        let update = room_update_document(&input, now()).map_err(|error| error.to_string())?;
+        let updated = service
+            .parties()
+            .find_one_and_update(
+                room_update_filter(code, Some(revision)),
+                update,
+            )
+            .return_document(ReturnDocument::After)
+            .await
+            .map_err(|error| error.to_string())?;
+        if updated.is_some() {
+            return Ok(updated);
+        }
+    }
+    Ok(None)
+}
+
+async fn persist_host_room_state(
+    service: &RoomService,
+    code: &str,
+    mut input: UpdateInput,
+) -> Result<Option<Party>, String> {
+    for _ in 0..3 {
+        let current = service
+            .parties()
+            .find_one(doc! { "code": normalize_code(code) })
+            .await
+            .map_err(|error| error.to_string())?;
+        let Some(current) = current else {
+            return Ok(None);
+        };
+        let revision = now().max(current.sync_revision.saturating_add(1));
+        input.sync_revision = Some(revision);
+        let update = room_update_document(&input, now()).map_err(|error| error.to_string())?;
+        let update_size = mongodb::bson::to_vec(&update)
+            .map_err(|error| error.to_string())?
+            .len();
+        if update_size > MAX_ROOM_UPDATE_BYTES {
+            return Err("Host room state exceeds the data limit".to_string());
+        }
+        let updated = service
+            .parties()
+            .find_one_and_update(
+                room_update_filter(code, Some(revision)),
+                update,
+            )
+            .return_document(ReturnDocument::After)
+            .await
+            .map_err(|error| error.to_string())?;
+        if updated.is_some() {
+            return Ok(updated);
+        }
+    }
+    Ok(None)
+}
+
 async fn host_authorized(state: &AppState, room_code: &str, headers: &HeaderMap) -> Result<bool, Response> {
     let Some(token) = headers.get(AUTHORIZATION).and_then(|value| value.to_str().ok())
         .and_then(|value| value.strip_prefix("Bearer ")) else { return Ok(false); };
@@ -1559,6 +1713,7 @@ async fn handle_room_socket(
         service.disconnected(&code, &username).await;
         return;
     }
+    let mut last_progress_persist = Instant::now();
     let session_deadline = tokio::time::Instant::now()
         + Duration::from_millis(expires_at.saturating_sub(epoch_millis()).max(0) as u64);
     loop {
@@ -1593,12 +1748,67 @@ async fn handle_room_socket(
                                 if party.members.iter().any(|member| member == &username)
                                     && room_command_allowed(&party, &command)
                                 {
-                                    service.publish_from(
-                                        &code,
-                                        "room-command",
-                                        RoomCommandEnvelope { username: username.clone(), command },
-                                        Some(&socket_id),
-                                    ).await;
+                                    if is_server_queue_command(&command) {
+                                        match persist_server_queue_command(&service, &code, &username, &command).await {
+                                            Ok(Some(updated)) => {
+                                                service.publish(&code, "room-state", &updated).await;
+                                            }
+                                            Ok(None) => {}
+                                            Err(error) => {
+                                                tracing::error!(room_code = %code, %error, "Room queue command could not be saved");
+                                                let failure = serde_json::json!({
+                                                    "event": "error",
+                                                    "data": "The room queue could not be saved; try again.",
+                                                    "sender": null,
+                                                });
+                                                let _ = outgoing.send(Message::Text(failure.to_string().into())).await;
+                                            }
+                                        }
+                                    } else {
+                                        service.publish_from(
+                                            &code,
+                                            "room-command",
+                                            RoomCommandEnvelope { username: username.clone(), command },
+                                            Some(&socket_id),
+                                        ).await;
+                                    }
+                                }
+                            }
+                            "host-room-state" if is_host => {
+                                let Ok(input) = serde_json::from_value::<UpdateInput>(message.data) else {
+                                    continue;
+                                };
+                                if input.sync_revision.is_none()
+                                    || input.sync_revision.is_some_and(|revision| revision < 0)
+                                    || input.queue.as_ref().is_some_and(|queue| {
+                                        queue.len() > MAX_ROOM_QUEUE_TRACKS
+                                            || queue.iter().any(|track| !room_track_is_shareable(track))
+                                    })
+                                    || input.repeat_mode.as_ref().is_some_and(|mode| {
+                                        !matches!(mode.as_str(), "off" | "all" | "one")
+                                    })
+                                {
+                                    continue;
+                                }
+                                match persist_host_room_state(&service, &code, input).await {
+                                    Ok(Some(updated)) => {
+                                        service.publish_from(
+                                            &code,
+                                            "room-state",
+                                            &updated,
+                                            Some(&socket_id),
+                                        ).await;
+                                    }
+                                    Ok(None) => {}
+                                    Err(error) => {
+                                        tracing::error!(room_code = %code, %error, "Host room state could not be saved");
+                                        let failure = serde_json::json!({
+                                            "event": "error",
+                                            "data": "Room state could not be saved; reconnect to retry.",
+                                            "sender": null,
+                                        });
+                                        let _ = outgoing.send(Message::Text(failure.to_string().into())).await;
+                                    }
                                 }
                             }
                             "playback-control" if is_host => {
@@ -1609,6 +1819,48 @@ async fn handle_room_socket(
                                     && (0.0..=86_400.0).contains(&control.current_time)
                                     && control.sent_at_epoch_ms > 0
                                 {
+                                    let updated_at = now();
+                                    let input = UpdateInput {
+                                        queue: None,
+                                        playlists: None,
+                                        current_track_id: Some(control.current_track_id.clone()),
+                                        is_playing: Some(control.is_playing),
+                                        start_epoch: Some(updated_at.saturating_sub((control.current_time * 1000.0) as i64)),
+                                        paused_at: Some(control.current_time),
+                                        repeat_mode: None,
+                                        shuffle: None,
+                                        permissions: None,
+                                        sync_revision: None,
+                                    };
+                                    let update = match room_update_document(&input, updated_at) {
+                                        Ok(update) => update,
+                                        Err(error) => {
+                                            tracing::error!(room_code = %code, %error, "Playback state could not be serialized");
+                                            continue;
+                                        }
+                                    };
+                                    match service
+                                        .parties()
+                                        .find_one_and_update(
+                                            doc! { "code": &code },
+                                            update,
+                                        )
+                                        .return_document(ReturnDocument::After)
+                                        .await
+                                    {
+                                        Ok(Some(_)) => {}
+                                        Ok(None) => continue,
+                                        Err(error) => {
+                                            tracing::error!(room_code = %code, %error, "Playback state could not be saved");
+                                            let failure = serde_json::json!({
+                                                "event": "error",
+                                                "data": "Playback state could not be saved; try again.",
+                                                "sender": null,
+                                            });
+                                            let _ = outgoing.send(Message::Text(failure.to_string().into())).await;
+                                            continue;
+                                        }
+                                    }
                                     service.publish_from(&code, "playback-control", control, Some(&socket_id)).await;
                                 }
                             }
@@ -1621,6 +1873,31 @@ async fn handle_room_socket(
                                     && progress.duration.is_finite()
                                     && (0.0..=86_400.0).contains(&progress.duration)
                                 {
+                                    if last_progress_persist.elapsed() >= Duration::from_secs(5) {
+                                        let updated_at = now();
+                                        let input = UpdateInput {
+                                            queue: None,
+                                            playlists: None,
+                                            current_track_id: Some(progress.current_track_id.clone()),
+                                            is_playing: Some(true),
+                                            start_epoch: Some(updated_at.saturating_sub((progress.current_time * 1000.0) as i64)),
+                                            paused_at: Some(progress.current_time),
+                                            repeat_mode: None,
+                                            shuffle: None,
+                                            permissions: None,
+                                            sync_revision: None,
+                                        };
+                                        if let Ok(update) = room_update_document(&input, updated_at) {
+                                            if let Err(error) = service
+                                                .parties()
+                                                .update_one(doc! { "code": &code }, update)
+                                                .await
+                                            {
+                                                tracing::error!(room_code = %code, %error, "Playback progress could not be saved");
+                                            }
+                                        }
+                                        last_progress_persist = Instant::now();
+                                    }
                                     service.publish_from(&code, "playback-progress", progress, Some(&socket_id)).await;
                                 }
                             }
@@ -1996,6 +2273,7 @@ async fn main() {
                 HeaderName::from_static("x-room-access-token"),
             ])
             .allow_methods([axum::http::Method::GET, axum::http::Method::POST, axum::http::Method::PUT, axum::http::Method::DELETE])
+            .expose_headers([RETRY_AFTER])
             .allow_credentials(true))
         .with_state(state);
     let port = env::var("PORT").unwrap_or_else(|_| "5000".into()).parse().unwrap_or(5000);
@@ -2013,7 +2291,7 @@ mod tests {
         allowed_origins, client_ip, frontend_origin, hash_room_server_passcode,
         generate_room_code, is_shared_audio_stream_path, is_shared_audio_upload_path,
         normalize_code, parse_audio_id, parse_byte_range,
-        public_api_request, room_command_allowed, room_empty_cutoff, room_empty_timeout_expired,
+        apply_server_queue_command, public_api_request, room_command_allowed, room_empty_cutoff, room_empty_timeout_expired,
         room_update_document, room_update_filter,
         shared_audio_grant_matches, spotify_track_uris, token_hash, token_matches,
         too_many_requests, valid_room_code, verify_room_server_passcode, IpRateLimiter, Party,
@@ -2413,5 +2691,57 @@ mod tests {
         party.permissions.can_control_playback = true;
         assert!(room_command_allowed(&party, &clear_queue));
         assert!(room_command_allowed(&party, &toggle_playback));
+    }
+
+    #[test]
+    fn server_queue_commands_mutate_canonical_queue() {
+        let mut party = Party {
+            permissions: Permissions {
+                can_add: true,
+                can_manage_queue: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let add_track = serde_json::from_value::<RoomCommand>(serde_json::json!({
+            "action": "add-track",
+            "track": { "id": "spotify:track:one", "source": "spotify" }
+        }))
+        .unwrap();
+        let add_second_track = serde_json::from_value::<RoomCommand>(serde_json::json!({
+            "action": "add-track",
+            "track": { "id": "spotify:track:two", "source": "spotify" }
+        }))
+        .unwrap();
+        let reorder = serde_json::from_value::<RoomCommand>(serde_json::json!({
+            "action": "reorder-queue",
+            "trackId": "spotify:track:one",
+            "targetIndex": 1
+        }))
+        .unwrap();
+        let remove = serde_json::from_value::<RoomCommand>(serde_json::json!({
+            "action": "remove-track",
+            "trackId": "spotify:track:one"
+        }))
+        .unwrap();
+        let clear = serde_json::from_value::<RoomCommand>(serde_json::json!({
+            "action": "clear-queue"
+        }))
+        .unwrap();
+
+        assert!(apply_server_queue_command(&mut party, &add_track, "Guest"));
+        assert_eq!(party.queue[0].added_by, "Guest");
+        assert!(!apply_server_queue_command(&mut party, &add_track, "Guest"));
+        assert!(apply_server_queue_command(
+            &mut party,
+            &add_second_track,
+            "Guest"
+        ));
+        assert!(apply_server_queue_command(&mut party, &reorder, "Guest"));
+        assert_eq!(party.queue[1].id, "spotify:track:one");
+        assert!(apply_server_queue_command(&mut party, &remove, "Guest"));
+        assert_eq!(party.queue[0].id, "spotify:track:two");
+        assert!(apply_server_queue_command(&mut party, &clear, "Guest"));
+        assert!(party.queue.is_empty());
     }
 }

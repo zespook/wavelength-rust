@@ -438,6 +438,10 @@ pub async fn emit_room_playback_progress(progress: &Value) -> Result<String, Str
     call_js("emitRoomPlaybackProgress", &[progress.clone()]).await
 }
 
+pub async fn emit_room_host_state(state: &Value) -> Result<String, String> {
+    call_js("emitRoomHostState", &[state.clone()]).await
+}
+
 pub async fn drain_room_events() -> Result<Vec<RoomSocketEvent>, String> {
     call_js("drainRoomEvents", &[]).await
 }

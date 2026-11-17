@@ -954,7 +954,12 @@ export async function roomRequest(url, path, method, body, access, host) {
   } catch {
     throw new Error("Room server returned invalid JSON.");
   }
-  if (!response.ok) throw new Error(data.error || "Room request failed.");
+  if (!response.ok) {
+    const error = new Error(data.error || "Room request failed.");
+    error.status = response.status;
+    error.retryAfter = Number(response.headers.get("Retry-After")) || 0;
+    throw error;
+  }
   return data;
 }
 export async function requestJson(url) {
@@ -1003,7 +1008,19 @@ let roomSocketEvents = [];
 let roomSocketRetry = null;
 let roomSocketRetryDelay = 2000;
 let roomSocketId = null;
+let roomSocketStableTimer = null;
+let roomTicketRequest = null;
 export function connectRoomSocket(url, code, username, accessToken, hostToken, role, permissions) {
+  if (roomSocketConfig
+    && roomSocketConfig.url === url
+    && roomSocketConfig.code === code
+    && roomSocketConfig.username === username
+    && roomSocketConfig.accessToken === accessToken
+    && roomSocketConfig.hostToken === hostToken
+    && roomSocketConfig.role === role) {
+    roomSocketConfig.permissions = permissions;
+    return true;
+  }
   disconnectRoomSocket();
   roomSocketRetryDelay = 2000;
   roomSocketId = null;
@@ -1013,8 +1030,10 @@ export function connectRoomSocket(url, code, username, accessToken, hostToken, r
   return true;
 }
 function openRoomSocket() {
-  if (!roomSocketConfig) return;
+  if (!roomSocketConfig || roomTicketRequest || roomSocket || roomSocketRetry) return;
   const config = roomSocketConfig;
+  const requestId = {};
+  roomTicketRequest = requestId;
   roomRequest(
     config.url,
     `/rooms/${encodeURIComponent(config.code)}/socket-ticket`,
@@ -1025,15 +1044,19 @@ function openRoomSocket() {
   ).then(({ ticket }) => {
     if (roomSocketConfig !== config) return;
     if (typeof ticket !== "string" || !ticket) throw new Error("Room server did not issue a connection ticket.");
+    if (roomTicketRequest === requestId) roomTicketRequest = null;
     openRoomWebSocket(config, ticket);
   }).catch(error => {
     if (roomSocketConfig !== config) return;
+    if (roomTicketRequest === requestId) roomTicketRequest = null;
     if (error.message === "Room not found") {
       roomSocketEvents.push({ event: "room-closed", data: config.code });
       return;
     }
     roomSocketEvents.push({ event: "error", data: error.message || "Room connection could not be authorized." });
-    scheduleRoomSocketRetry(config);
+    scheduleRoomSocketRetry(config, (error.retryAfter || 0) * 1000);
+  }).finally(() => {
+    if (roomTicketRequest === requestId) roomTicketRequest = null;
   });
 }
 function openRoomWebSocket(config, ticket) {
@@ -1054,6 +1077,11 @@ function openRoomWebSocket(config, ticket) {
     if (roomSocket !== socket) return;
     roomSocketReady = true;
     roomSocketEvents.push({ event: "connect", data: null });
+    if (roomSocketStableTimer) window.clearTimeout(roomSocketStableTimer);
+    roomSocketStableTimer = window.setTimeout(() => {
+      if (roomSocket === socket) roomSocketRetryDelay = 2000;
+      roomSocketStableTimer = null;
+    }, 30000);
   };
   socket.onmessage = ({ data }) => {
     if (roomSocket !== socket || typeof data !== "string") return;
@@ -1064,7 +1092,6 @@ function openRoomWebSocket(config, ticket) {
         return;
       }
       if (message.sender && message.sender === roomSocketId) return;
-      if (message.event === "room-state") roomSocketRetryDelay = 2000;
       if (message.event === "room-state" && message.data?.permissions) {
         config.permissions = message.data.permissions;
       }
@@ -1081,15 +1108,17 @@ function openRoomWebSocket(config, ticket) {
   });
   socket.onclose = () => {
     if (roomSocket !== socket) return;
+    if (roomSocketStableTimer) window.clearTimeout(roomSocketStableTimer);
+    roomSocketStableTimer = null;
     roomSocketReady = false;
     roomSocketEvents.push({ event: "disconnect", data: null });
     roomSocket = null;
     scheduleRoomSocketRetry(config);
   };
 }
-function scheduleRoomSocketRetry(config) {
-  if (roomSocketConfig !== config) return;
-  const delay = roomSocketRetryDelay;
+function scheduleRoomSocketRetry(config, retryAfterMs = 0) {
+  if (roomSocketConfig !== config || roomSocketRetry) return;
+  const delay = Math.max(roomSocketRetryDelay, retryAfterMs);
   roomSocketRetryDelay = Math.min(roomSocketRetryDelay * 2, 30000);
   roomSocketRetry = window.setTimeout(() => {
     roomSocketRetry = null;
@@ -1100,8 +1129,11 @@ export function disconnectRoomSocket() {
   roomSocketConfig = null;
   roomSocketId = null;
   roomSocketReady = false;
+  roomTicketRequest = null;
   if (roomSocketRetry) window.clearTimeout(roomSocketRetry);
   roomSocketRetry = null;
+  if (roomSocketStableTimer) window.clearTimeout(roomSocketStableTimer);
+  roomSocketStableTimer = null;
   if (roomSocket) {
     const socket = roomSocket;
     roomSocket = null;
@@ -1130,6 +1162,12 @@ export function emitRoomPlaybackProgress(progress) {
   if (!roomSocketConfig || roomSocketConfig.role !== "host") return "not-host";
   if (!roomSocket || roomSocket.readyState !== WebSocket.OPEN || !roomSocketReady) return "unavailable";
   roomSocket.send(JSON.stringify({ event: "playback-progress", data: progress }));
+  return "sent";
+}
+export function emitRoomHostState(state) {
+  if (!roomSocketConfig || roomSocketConfig.role !== "host") return "not-host";
+  if (!roomSocket || roomSocket.readyState !== WebSocket.OPEN || !roomSocketReady) return "unavailable";
+  roomSocket.send(JSON.stringify({ event: "host-room-state", data: state }));
   return "sent";
 }
 export function drainRoomEvents() {
@@ -1458,4 +1496,4 @@ export function equalizerCanvasSize() {
 }
 
 
-globalThis.__WAVELENGTH_BROWSER__ = { getLocal, setLocal, removeLocal, installHoverMarquee, watchNarrowWindow, chooseAvatar, getRoomInviteCode, copyRoomCode, copyRoomInvite, setAppearance, isDesktopWindow, checkForUpdates, installUpdate, windowAction, installAppBehaviors, setFontScale, effectiveTheme, startRailResize, searchAudio, restoreSpotify, spotifyLibrary, spotifyPlaylists, spotifyPlaylistTracks, saveSpotifyPlaylist, createSpotifyPlaylist, connectSpotify, disconnectSpotify, setSpotifyRefreshToken, getSpotifyRefreshToken, playAudio, playAudioSource, pauseAudio, seekAudio, readAudioTime, setAudioVolume, downloadAudio, savedDownloadFolderName, chooseDownloadFolder, clearDownloadFolder, savedLibraryFolders, removeSavedLibraryFolder, scanLibrary, chooseFolder, localUrl, roomRequest, requestJson, requestJsonMethod, fetchLyrics, connectRoomSocket, disconnectRoomSocket, emitRoomCommand, emitRoomPlaybackControl, emitRoomPlaybackProgress, drainRoomEvents, uploadRoomTrack, hasLocalAudioFile, roomAudioUrl, openExternalTrack, setEqualizer, startEqualizerVisualization, setEqualizerSelectedBand, setEqualizerPreview, clearEqualizerPreview, equalizerCanvasSize };
+globalThis.__WAVELENGTH_BROWSER__ = { getLocal, setLocal, removeLocal, installHoverMarquee, watchNarrowWindow, chooseAvatar, getRoomInviteCode, copyRoomCode, copyRoomInvite, setAppearance, isDesktopWindow, checkForUpdates, installUpdate, windowAction, installAppBehaviors, setFontScale, effectiveTheme, startRailResize, searchAudio, restoreSpotify, spotifyLibrary, spotifyPlaylists, spotifyPlaylistTracks, saveSpotifyPlaylist, createSpotifyPlaylist, connectSpotify, disconnectSpotify, setSpotifyRefreshToken, getSpotifyRefreshToken, playAudio, playAudioSource, pauseAudio, seekAudio, readAudioTime, setAudioVolume, downloadAudio, savedDownloadFolderName, chooseDownloadFolder, clearDownloadFolder, savedLibraryFolders, removeSavedLibraryFolder, scanLibrary, chooseFolder, localUrl, roomRequest, requestJson, requestJsonMethod, fetchLyrics, connectRoomSocket, disconnectRoomSocket, emitRoomCommand, emitRoomPlaybackControl, emitRoomPlaybackProgress, emitRoomHostState, drainRoomEvents, uploadRoomTrack, hasLocalAudioFile, roomAudioUrl, openExternalTrack, setEqualizer, startEqualizerVisualization, setEqualizerSelectedBand, setEqualizerPreview, clearEqualizerPreview, equalizerCanvasSize };

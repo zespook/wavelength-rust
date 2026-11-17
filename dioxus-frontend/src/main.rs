@@ -1603,7 +1603,7 @@ fn add_to_queue(track: Track, mut queue: Signal<Vec<Track>>, mut notice: Signal<
         .await
         {
             Ok(status) if status == "sent" => {
-                notice.set("Track request sent to the room host.".to_string());
+                notice.set("Track request sent to the room.".to_string());
                 return;
             }
             Ok(status) if status == "unavailable" => {
@@ -1639,7 +1639,7 @@ fn remove_queue_item(index: usize, mut queue: Signal<Vec<Track>>, mut notice: Si
         let track = items[index].clone();
         match browser::emit_room_command("remove-track", &serde_json::json!({"trackId":track.key()})).await {
             Ok(status) if status == "sent" => {
-                notice.set("Queue change sent to the room host.".to_string());
+                notice.set("Queue change sent to the room.".to_string());
                 return;
             }
             Ok(status) if status == "unavailable" => {
@@ -1681,7 +1681,7 @@ fn move_queue_item(
         .await
         {
             Ok(status) if status == "sent" => {
-                notice.set("Queue order request sent to the room host.".to_string());
+                notice.set("Queue order request sent to the room.".to_string());
                 return;
             }
             Ok(status) if status == "unavailable" => {
@@ -1709,7 +1709,7 @@ fn clear_queue(mut queue: Signal<Vec<Track>>, mut notice: Signal<String>) {
     spawn(async move {
         match browser::emit_room_command("clear-queue", &serde_json::json!({})).await {
             Ok(status) if status == "sent" => {
-                notice.set("Queue change sent to the room host.".to_string());
+                notice.set("Queue change sent to the room.".to_string());
                 return;
             }
             Ok(status) if status == "unavailable" => {
@@ -2681,6 +2681,23 @@ fn room_track_json(track: &Track) -> serde_json::Value {
     })
 }
 
+fn room_host_state_signature(
+    queue: &[serde_json::Value],
+    playlists: &[RoomSharedPlaylist],
+    permissions: &RoomPermissions,
+    repeat_mode: &str,
+    shuffle: bool,
+) -> String {
+    serde_json::to_string(&serde_json::json!({
+        "queue": queue,
+        "playlists": playlists,
+        "permissions": permissions,
+        "repeatMode": repeat_mode,
+        "shuffle": shuffle,
+    }))
+    .unwrap_or_default()
+}
+
 fn room_track_platform(track: &Track) -> String {
     track
         .source
@@ -2849,7 +2866,7 @@ async fn upload_room_queue_tracks(
 
 async fn room_sync_loop(
     room_url: Signal<String>,
-    room_access: Signal<String>,
+    _room_access: Signal<String>,
     room_name: Signal<String>,
     mut active_room_code: Signal<String>,
     mut room_role: Signal<String>,
@@ -2872,26 +2889,30 @@ async fn room_sync_loop(
     history: Signal<Vec<Track>>,
 ) {
     let mut last_error = String::new();
-    let mut next_rest_sync = 0.0;
+    let mut last_host_state = String::new();
+    let mut next_host_state_retry = 0.0;
+    let mut next_upload_retry = 0.0;
+    let mut next_playback_control_retry = 0.0;
     let mut last_playback_track = String::new();
     let mut last_playback_state = false;
     let mut last_progress_sent = 0.0;
     loop {
-        sleep_ms(150).await;
+        sleep_ms(250).await;
         let code = active_room_code();
         if code.is_empty() {
             last_error.clear();
-            next_rest_sync = 0.0;
+            last_host_state.clear();
+            next_host_state_retry = 0.0;
+            next_upload_retry = 0.0;
+            next_playback_control_retry = 0.0;
             last_playback_track.clear();
             continue;
         }
         let url = room_url();
-        let access = room_access();
         let role = room_role();
         let host_token = room_host_token();
         let name = room_name();
         let now = now_epoch_millis() as f64;
-        let mut pending_playback_control = None;
         let mut pushed_party = None;
 
         match browser::drain_room_events().await {
@@ -2899,14 +2920,15 @@ async fn room_sync_loop(
                 for event in events {
                     if event.event == "connect" {
                         last_playback_track.clear();
+                        last_host_state.clear();
+                        next_host_state_retry = 0.0;
+                        next_playback_control_retry = 0.0;
                     } else if event.event == "room-state" {
                         if let Ok(party) = serde_json::from_value::<RoomParty>(event.data) {
                             room_members.set(party.members.clone());
                             room_permissions.set(party.permissions.clone());
                             room_shared_playlists.set(party.playlists.clone());
-                            if role == "guest" {
-                                pushed_party = Some(party);
-                            }
+                            pushed_party = Some(party);
                         }
                     } else if role == "guest"
                         && matches!(
@@ -3026,6 +3048,10 @@ async fn room_sync_loop(
                             notice.set(error.to_string());
                             last_error = error.to_string();
                         }
+                        if role == "host" {
+                            last_host_state.clear();
+                            next_host_state_retry = now + 5000.0;
+                        }
                     }
                 }
             }
@@ -3041,33 +3067,75 @@ async fn room_sync_loop(
         }
 
         if role == "host" {
+            if let Some(party) = pushed_party.as_ref() {
+                last_error.clear();
+                if !party.members.iter().any(|member| member == &name) {
+                    active_room_code.set(String::new());
+                    room_role.set(String::new());
+                    room_host_token.set(String::new());
+                    room_members.set(Vec::new());
+                    room_permissions.set(RoomPermissions::default());
+                    room_shared_playlists.set(Vec::new());
+                    notice.set("You are no longer a member of this room.".to_string());
+                    clear_saved_room_session(room_sessions, &url, &code, notice);
+                    continue;
+                }
+                room_members.set(party.members.clone());
+                room_permissions.set(party.permissions.clone());
+                room_shared_playlists.set(party.playlists.clone());
+                if queue() != party.queue {
+                    queue.set(party.queue.clone());
+                    if let Err(error) = browser::save("wavelength-queue", &party.queue) {
+                        notice.set(error);
+                    }
+                }
+                shuffle.set(party.shuffle);
+                repeat_mode.set(if matches!(party.repeat_mode.as_str(), "off" | "all" | "one") {
+                    party.repeat_mode.clone()
+                } else {
+                    "off".to_string()
+                });
+                let shared_queue = party.queue.iter().map(room_track_json).collect::<Vec<_>>();
+                last_host_state = room_host_state_signature(
+                    &shared_queue,
+                    &party.playlists,
+                    &party.permissions,
+                    &party.repeat_mode,
+                    party.shuffle,
+                );
+            }
+
             if let Some(track) = current().filter(|track| !track.key().is_empty()) {
                 let track_id = track.key().to_string();
-                if track_id != last_playback_track || playing() != last_playback_state {
+                if (track_id != last_playback_track || playing() != last_playback_state)
+                    && now >= next_playback_control_retry
+                {
                     let control = serde_json::json!({
                         "currentTrackId": track_id,
                         "currentTime": playhead().max(0.0),
                         "isPlaying": playing(),
                         "sentAtEpochMs": now as i64,
                     });
-                    if track_id == last_playback_track {
-                        match browser::emit_room_playback_control(&control).await {
-                            Ok(status) if status == "sent" => {
-                                last_playback_state = playing();
-                                last_progress_sent = now;
-                            }
-                            Ok(status) if status == "unavailable" => {
-                                last_playback_state = playing();
-                            }
-                            Ok(_) => {}
-                            Err(error) if last_error != error => {
+                    match browser::emit_room_playback_control(&control).await {
+                        Ok(status) if status == "sent" => {
+                            last_playback_track = track_id.clone();
+                            last_playback_state = playing();
+                            last_progress_sent = now;
+                            next_playback_control_retry = 0.0;
+                        }
+                        Ok(status) if status == "unavailable" => {
+                            last_playback_track = track_id.clone();
+                            last_playback_state = playing();
+                            next_playback_control_retry = now + 1000.0;
+                        }
+                        Ok(_) => {}
+                        Err(error) => {
+                            if last_error != error {
                                 notice.set(error.clone());
                                 last_error = error;
                             }
-                            Err(_) => {}
+                            next_playback_control_retry = now + 2000.0;
                         }
-                    } else {
-                        pending_playback_control = Some((track_id.clone(), playing(), control));
                     }
                 }
                 if track_id == last_playback_track && playing() && now - last_progress_sent >= 250.0
@@ -3092,106 +3160,90 @@ async fn room_sync_loop(
             } else {
                 last_playback_track.clear();
             }
-        }
 
-        if role == "host" {
-            if now < next_rest_sync {
-                continue;
+            let mut upload_candidates = queue();
+            if let Some(track) = current() {
+                upload_candidates.push(track);
             }
-            next_rest_sync = now + 1500.0;
-        }
-
-        if role == "host" {
-            if let Err(error) =
-                upload_room_queue_tracks(&url, &code, &host_token, queue, current, local_tracks)
-                    .await
+            if now >= next_upload_retry
+                && upload_candidates
+                    .iter()
+                    .any(|track| track.is_local() && track.audio_id.is_none())
             {
-                let error = format!("Room track upload failed: {error}");
-                if last_error != error {
-                    notice.set(error.clone());
-                    last_error = error;
+                match upload_room_queue_tracks(
+                    &url,
+                    &code,
+                    &host_token,
+                    queue,
+                    current,
+                    local_tracks,
+                )
+                .await
+                {
+                    Ok(()) => {
+                        next_upload_retry = now + 5000.0;
+                        last_host_state.clear();
+                    }
+                    Err(error) => {
+                        let error = format!("Room track upload failed: {error}");
+                        if last_error != error {
+                            notice.set(error.clone());
+                            last_error = error;
+                        }
+                        next_upload_retry = now + 5000.0;
+                    }
                 }
-                continue;
             }
+
             let mut shared_queue = queue()
                 .into_iter()
                 .filter(|track| !track.is_local() || track.audio_id.is_some())
                 .collect::<Vec<_>>();
-            let shared_current =
-                current().filter(|track| !track.is_local() || track.audio_id.is_some());
-            if let Some(track) = shared_current.as_ref() {
+            if let Some(track) = current().filter(|track| !track.is_local() || track.audio_id.is_some()) {
                 if !shared_queue.iter().any(|item| item.key() == track.key()) {
-                    shared_queue.insert(0, track.clone());
+                    shared_queue.insert(0, track);
                 }
             }
             let shared_queue = shared_queue.iter().map(room_track_json).collect::<Vec<_>>();
-            let position = playhead().max(0.0);
-            let now_epoch = now as i64;
-            let update = serde_json::json!({
-                "username": name,
-                "queue": shared_queue,
-                "playlists": room_playlist_references(&playlists()),
-                "currentTrackId": shared_current.as_ref().map(Track::key).unwrap_or_default(),
-                "isPlaying": shared_current.is_some() && playing(),
-                "startEpoch": now_epoch - (position * 1000.0) as i64,
-                "pausedAt": position,
-                "repeatMode": repeat_mode(),
-                "shuffle": shuffle(),
-                "permissions": room_permissions(),
-                "syncRevision": now_epoch,
-            });
-            let client = browser::RoomClient::new(&url, &access);
-            match client.update(&code, &update, &host_token).await {
-                Ok(party) => {
-                    room_members.set(party.members);
-                    room_permissions.set(party.permissions);
-                    room_shared_playlists.set(party.playlists);
-                    last_error.clear();
-                    if let Some((track_id, is_playing, control)) = pending_playback_control {
-                        match browser::emit_room_playback_control(&control).await {
-                            Ok(status) if status == "sent" => {
-                                last_playback_track = track_id;
-                                last_playback_state = is_playing;
-                                last_progress_sent = now;
-                            }
-                            Ok(status) if status == "unavailable" => {
-                                last_playback_track = track_id;
-                                last_playback_state = is_playing;
-                            }
-                            Ok(_) => {}
-                            Err(error) if last_error != error => {
-                                notice.set(error.clone());
-                                last_error = error;
-                            }
-                            Err(_) => {}
+            let shared_playlists = room_playlist_references(&playlists());
+            let permissions = room_permissions();
+            let repeat = repeat_mode();
+            let is_shuffle = shuffle();
+            let signature = room_host_state_signature(
+                &shared_queue,
+                &shared_playlists,
+                &permissions,
+                &repeat,
+                is_shuffle,
+            );
+            if signature != last_host_state && now >= next_host_state_retry {
+                let update = serde_json::json!({
+                    "queue": shared_queue,
+                    "playlists": shared_playlists,
+                    "repeatMode": repeat,
+                    "shuffle": is_shuffle,
+                    "permissions": permissions,
+                    "syncRevision": now as i64,
+                });
+                match browser::emit_room_host_state(&update).await {
+                    Ok(status) if status == "sent" => {
+                        last_host_state = signature;
+                        next_host_state_retry = 0.0;
+                        last_error.clear();
+                    }
+                    Ok(status) if status == "unavailable" => {
+                        next_host_state_retry = now + 1000.0;
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        if last_error != error {
+                            notice.set(error.clone());
+                            last_error = error;
                         }
+                        next_host_state_retry = now + 5000.0;
                     }
-                }
-                Err(error) => {
-                    if last_error != error {
-                        notice.set(format!("Room sync failed: {error}"));
-                        last_error = error.clone();
-                    }
-                    if error == "Room not found" {
-                        if role == "guest" {
-                            if let Err(restore_error) = restore_guest_queue(queue) {
-                                notice.set(restore_error);
-                            }
-                        }
-                        active_room_code.set(String::new());
-                        room_role.set(String::new());
-                        room_host_token.set(String::new());
-                        room_members.set(Vec::new());
-                        room_permissions.set(RoomPermissions::default());
-                        room_shared_playlists.set(Vec::new());
-                        clear_saved_room_session(room_sessions, &url, &code, notice);
-                    }
-                    continue;
                 }
             }
-        }
-
-        if role == "host" {
             continue;
         }
 

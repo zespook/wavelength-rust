@@ -128,6 +128,8 @@ extern "C" {
     fn emit_room_playback_control_js(control: JsValue) -> Result<JsValue, JsValue>;
     #[wasm_bindgen(catch, js_name = emitRoomPlaybackProgress)]
     fn emit_room_playback_progress_js(progress: JsValue) -> Result<JsValue, JsValue>;
+    #[wasm_bindgen(catch, js_name = emitRoomHostState)]
+    fn emit_room_host_state_js(state: JsValue) -> Result<JsValue, JsValue>;
     #[wasm_bindgen(catch, js_name = drainRoomEvents)]
     fn drain_room_events_js() -> Result<JsValue, JsValue>;
     #[wasm_bindgen(catch, js_name = uploadRoomTrack)]
@@ -534,6 +536,14 @@ pub async fn emit_room_playback_progress(progress: &serde_json::Value) -> Result
         .map_err(error)?
         .as_string()
         .ok_or_else(|| "Room playback progress returned an invalid status.".to_string())
+}
+
+pub async fn emit_room_host_state(state: &serde_json::Value) -> Result<String, String> {
+    let value = serde_wasm_bindgen::to_value(state).map_err(|error| error.to_string())?;
+    emit_room_host_state_js(value)
+        .map_err(error)?
+        .as_string()
+        .ok_or_else(|| "Room state returned an invalid status.".to_string())
 }
 
 pub async fn drain_room_events() -> Result<Vec<RoomSocketEvent>, String> {
