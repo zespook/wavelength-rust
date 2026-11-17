@@ -49,7 +49,9 @@ struct AppState {
     trusted_proxies: HashSet<IpAddr>,
     passcode_rate_limiter: IpRateLimiter,
     room_join_rate_limiter: IpRateLimiter,
-    room_lookup_rate_limiter: IpRateLimiter,
+    room_read_rate_limiter: IpRateLimiter,
+    room_socket_ticket_rate_limiter: IpRateLimiter,
+    shared_audio_stream_rate_limiter: IpRateLimiter,
     room_access_sessions: Arc<Mutex<HashMap<String, i64>>>,
     shared_audio_access: Arc<Mutex<HashMap<String, SharedAudioGrant>>>,
 }
@@ -1450,7 +1452,7 @@ async fn read_room(
     ConnectInfo(address): ConnectInfo<SocketAddr>,
 ) -> Response {
     let address = client_ip(address, &headers, &state.trusted_proxies);
-    if let Err(retry_after) = state.room_lookup_rate_limiter.check(address).await {
+    if let Err(retry_after) = state.room_read_rate_limiter.check(address).await {
         return too_many_requests(retry_after);
     }
     match find_party(&state, &room_code).await {
@@ -1554,7 +1556,7 @@ async fn create_room_socket_ticket(
     Json(input): Json<RoomSocketTicketInput>,
 ) -> Response {
     let address = client_ip(address, &headers, &state.trusted_proxies);
-    if let Err(retry_after) = state.room_lookup_rate_limiter.check(address).await {
+    if let Err(retry_after) = state.room_socket_ticket_rate_limiter.check(address).await {
         return too_many_requests(retry_after);
     }
     let username = clean(&input.username);
@@ -2054,7 +2056,7 @@ async fn stream_shared_audio(
         return failure(StatusCode::INTERNAL_SERVER_ERROR, "Client address is unavailable");
     };
     let address = client_ip(address, request.headers(), &state.trusted_proxies);
-    if let Err(retry_after) = state.room_lookup_rate_limiter.check(address).await {
+    if let Err(retry_after) = state.shared_audio_stream_rate_limiter.check(address).await {
         return too_many_requests(retry_after);
     }
     let party = match find_party(&state, &room_code).await { Ok(party) => party, Err(error) => return error };
@@ -2205,7 +2207,9 @@ async fn main() {
         trusted_proxies,
         passcode_rate_limiter: IpRateLimiter::new(8),
         room_join_rate_limiter: IpRateLimiter::new(10),
-        room_lookup_rate_limiter: IpRateLimiter::new(60),
+        room_read_rate_limiter: IpRateLimiter::new(60),
+        room_socket_ticket_rate_limiter: IpRateLimiter::new(60),
+        shared_audio_stream_rate_limiter: IpRateLimiter::new(60),
         room_access_sessions: Arc::new(Mutex::new(HashMap::new())),
         shared_audio_access: Arc::new(Mutex::new(HashMap::new())),
     };

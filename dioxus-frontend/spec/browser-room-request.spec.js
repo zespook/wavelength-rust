@@ -39,6 +39,68 @@ test("roomRequest sends serialized JSON once and omits bodies on GET", async () 
   }
 });
 
+test("roomRequest retries GET once after Retry-After", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalSetTimeout = globalThis.setTimeout;
+  const requests = [];
+  const delays = [];
+  const responses = [
+    new Response('{"error":"Too many attempts"}', {
+      status: 429,
+      headers: { "Content-Type": "application/json", "Retry-After": "3" }
+    }),
+    new Response('{"code":"ABCD"}', {
+      headers: { "Content-Type": "application/json" }
+    })
+  ];
+  globalThis.fetch = async (url, options) => {
+    requests.push({ url, options });
+    return responses.shift();
+  };
+  globalThis.setTimeout = (callback, delay) => {
+    delays.push(delay);
+    callback();
+    return 1;
+  };
+
+  try {
+    const result = await roomRequest("https://rooms.example", "/rooms/ABCD", "GET", "{}", "access", "");
+    assert.deepEqual(result, { code: "ABCD" });
+    assert.equal(requests.length, 2);
+    assert.deepEqual(delays, [3000]);
+  } finally {
+    globalThis.fetch = originalFetch;
+    globalThis.setTimeout = originalSetTimeout;
+  }
+});
+
+test("roomRequest does not retry writes after a rate limit", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalSetTimeout = globalThis.setTimeout;
+  const requests = [];
+  globalThis.fetch = async (url, options) => {
+    requests.push({ url, options });
+    return new Response('{"error":"Too many attempts"}', {
+      status: 429,
+      headers: { "Content-Type": "application/json", "Retry-After": "3" }
+    });
+  };
+  globalThis.setTimeout = () => {
+    throw new Error("Write requests must not be retried.");
+  };
+
+  try {
+    await assert.rejects(
+      roomRequest("https://rooms.example", "/rooms", "POST", '{"host":"Host"}', "access", ""),
+      /Too many attempts/
+    );
+    assert.equal(requests.length, 1);
+  } finally {
+    globalThis.fetch = originalFetch;
+    globalThis.setTimeout = originalSetTimeout;
+  }
+});
+
 test("room sockets use a one-time ticket and direct JSON events", async () => {
   const OriginalWebSocket = globalThis.WebSocket;
   const originalWindow = globalThis.window;

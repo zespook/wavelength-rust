@@ -4,14 +4,15 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 
 async fn call_js<T: DeserializeOwned>(function: &str, arguments: &[Value]) -> Result<T, String> {
-    let function = serde_json::to_string(function).map_err(|error| error.to_string())?;
+    let function_name = function;
+    let function = serde_json::to_string(function_name).map_err(|error| error.to_string())?;
     let arguments = serde_json::to_string(arguments).map_err(|error| error.to_string())?;
     let script = format!(
         "try{{const value=await globalThis.__WAVELENGTH_BROWSER__[{function}](...{arguments});const refreshToken=globalThis.__WAVELENGTH_BROWSER__.getSpotifyRefreshToken?.()||null;return {{ok:true,value:value??null,refreshToken}};}}catch(error){{return {{ok:false,error:String(error?.message??error)}};}}"
     );
     let response: Value = dioxus::document::eval(&script)
         .await
-        .map_err(|error| format!("The app bridge failed: {error}"))?;
+        .map_err(|error| format!("The app bridge call {function_name} failed: {error}"))?;
     if response.get("ok").and_then(Value::as_bool) != Some(true) {
         return Err(response
             .get("error")

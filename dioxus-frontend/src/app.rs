@@ -252,6 +252,7 @@ pub(crate) fn App() -> Element {
     let room_permissions = use_signal(RoomPermissions::default);
     let room_shared_playlists = use_signal(Vec::<RoomSharedPlaylist>::new);
     let room_sessions = use_signal(Vec::<RoomSession>::new);
+    let mut startup_initialization_ran = use_signal(|| false);
     let mut room_panel_open = use_signal(|| false);
     let mut queue_panel_open = use_signal(|| false);
     let room_copy_feedback = use_signal(String::new);
@@ -546,6 +547,11 @@ pub(crate) fn App() -> Element {
     });
 
     use_effect(move || {
+        if startup_initialization_ran() {
+            return;
+        }
+        startup_initialization_ran.set(true);
+
         load_saved("wavelength-playlists", playlists, notice);
         load_saved("wavelength-favorites", favorites, notice);
         load_saved("wavelength-play-history", history, notice);

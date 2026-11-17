@@ -8,6 +8,26 @@ mod desktop;
 #[cfg(test)]
 mod tests;
 
+#[cfg(test)]
+mod audio_id_tests {
+    use super::Track;
+
+    #[test]
+    fn empty_shared_audio_ids_are_treated_as_missing() {
+        let missing: Track = serde_json::from_str(r#"{"audioId":""}"#).unwrap();
+        let shared: Track = serde_json::from_str(
+            r#"{"audioId":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.flac"}"#,
+        )
+        .unwrap();
+
+        assert_eq!(missing.audio_id, None);
+        assert_eq!(
+            shared.audio_id.as_deref(),
+            Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.flac")
+        );
+    }
+}
+
 use dioxus::prelude::*;
 use serde::{Deserialize, Serialize};
 #[cfg(target_arch = "wasm32")]
@@ -176,7 +196,15 @@ struct Track {
     #[serde(default, rename = "folderPath")]
     folder_path: Option<String>,
     #[serde(default, rename = "audioId")]
+    #[serde(deserialize_with = "deserialize_non_empty_string")]
     audio_id: Option<String>,
+}
+
+fn deserialize_non_empty_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<String>::deserialize(deserializer)?.filter(|value| !value.trim().is_empty()))
 }
 
 impl Track {
@@ -1550,7 +1578,10 @@ fn play_track_direct(
     let track_id = track.key().to_string();
     let audio_service_id = track.audio_service_id();
     let is_local = track.is_local();
-    let shared_audio_id = track.audio_id.clone();
+    let shared_audio_id = track
+        .audio_id
+        .clone()
+        .filter(|audio_id| !audio_id.trim().is_empty());
     let track_for_history = track.clone();
     current.set(Some(track));
     playing.set(false);
