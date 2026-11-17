@@ -134,7 +134,15 @@ docker run -d \
   wavelength-rooms-api
 ```
 
-The server API is available at `http://localhost:5050`; it does not host the app UI. Enter that address in the app's Settings for same-device use, or use an HTTPS reverse proxy for remote clients. The API accepts normal HTTP requests and Socket.IO WebSocket upgrades. A reverse proxy must route both `/api/...` and `/socket.io/` to the same API service and pass WebSocket upgrades. The local Dioxus origins on port `8080` are allowed by default. For a deployed web app, set `FRONTEND_URL` in the room server's `.env` to its exact HTTPS origin without a path, then restart the server.
+The server API is available at `http://localhost:5050`; it does not host the app UI. Enter that address in the app's Settings for same-device use, or use an HTTPS reverse proxy for remote clients. Room traffic uses the versioned `/api/v2` REST API and a direct JSON WebSocket at `/api/v2/rooms/{code}/socket`. Route both paths to the same service and pass WebSocket upgrades. The local Dioxus origins on port `8080` are allowed by default. For a deployed web app, set `FRONTEND_URL` in the room server's `.env` to its exact HTTPS origin without a path, then restart the server.
+
+### Room API v2
+
+Authenticate to a room server with `POST /api/v2/session` and `{"passcode":"..."}`; the response contains a short-lived `token`. Send that token in `x-room-access-token` on room API requests. Create a room with `POST /api/v2/rooms` and `{"host":"..."}`; join with `POST /api/v2/rooms/join` and `{"code":"AB12","username":"..."}`. Both responses include `code` and `party`; creation also returns `hostToken`.
+
+Use `GET`, `PUT`, or `DELETE /api/v2/rooms/{code}` to read state, update host-owned queue/playback/playlist/permission state, or end a room. Host writes and local-audio uploads require `Authorization: Bearer {hostToken}`. Guests leave with `POST /api/v2/rooms/{code}/leave` and `{"username":"..."}`. Host-local audio uses `POST /api/v2/rooms/{code}/audio`; clients obtain a temporary stream URL from `GET /api/v2/rooms/{code}/audio/{audioId}/access`.
+
+Before opening a WebSocket, clients request a 60-second, one-use ticket from `POST /api/v2/rooms/{code}/socket-ticket` with `{"username":"..."}` and the normal room access/host authorization headers. Connect to `/api/v2/rooms/{code}/socket?ticket=...`; access and host tokens are not placed in the WebSocket URL. Clients send JSON `{"event":"...","data":{...}}` messages for `room-command`, `playback-control`, and `playback-progress`. Server events use the same envelope with `room-state`, `room-command`, playback events, or `room-closed`. Room state is pushed to guests over this connection; clients do not poll for guest state. Rooms close five minutes after the last live room socket disconnects. Saved client sessions continue to restore through the same v2 API.
 
 The server recognizes `CF-Connecting-IP`, `True-Client-IP`, `Fastly-Client-IP`, `X-Real-IP`, `X-Client-IP`, `X-Forwarded-For`, and the RFC `Forwarded` header. It ignores these headers unless the direct peer is listed in `ROOM_SERVER_TRUSTED_PROXIES`. Set every proxy hop's IP when relying on a forwarded chain, and configure proxies to set or append client-IP headers correctly. Never trust arbitrary client-supplied headers.
 

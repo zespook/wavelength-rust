@@ -116,6 +116,7 @@ extern "C" {
         code: &str,
         username: &str,
         access_token: &str,
+        host_token: &str,
         role: &str,
         permissions: JsValue,
     ) -> Result<bool, JsValue>;
@@ -493,12 +494,13 @@ pub fn connect_room_socket(
     code: &str,
     username: &str,
     access_token: &str,
+    host_token: &str,
     role: &str,
     permissions: &RoomPermissions,
 ) -> Result<(), String> {
     let permissions =
         serde_wasm_bindgen::to_value(permissions).map_err(|error| error.to_string())?;
-    connect_room_socket_js(url, code, username, access_token, role, permissions)
+    connect_room_socket_js(url, code, username, access_token, host_token, role, permissions)
         .map(|_| ())
         .map_err(error)
 }

@@ -2041,16 +2041,8 @@ fn toggle_room_permission(
     let name = room_name();
     let host = host_token();
     spawn(async move {
-        match browser::room_request::<RoomParty>(
-            &url,
-            &format!("/parties/{code}"),
-            "PUT",
-            &serde_json::json!({"username": name, "permissions": updated}),
-            &access,
-            &host,
-        )
-        .await
-        {
+        let client = browser::RoomClient::new(&url, &access);
+        match client.update(&code, &serde_json::json!({"username": name, "permissions": updated}), &host).await {
             Ok(party) => permissions.set(party.permissions),
             Err(error) => {
                 permissions.set(previous);
@@ -2212,16 +2204,8 @@ fn connect_room(
     connecting.set(true);
     notice.set(String::new());
     spawn(async move {
-        match browser::room_request::<AccessResult>(
-            &url,
-            "/auth/session",
-            "POST",
-            &serde_json::json!({"passcode":passcode_value}),
-            "",
-            "",
-        )
-        .await
-        {
+        let client = browser::RoomClient::new(&url, "");
+        match client.authenticate(&passcode_value).await {
             Ok(result) => match browser::save("wavelength-room-access", &result.token) {
                 Ok(()) => {
                     access.set(result.token);
@@ -2273,7 +2257,7 @@ fn switch_room(
     mut room_url: Signal<String>,
     mut room_url_input: Signal<String>,
     mut room_access: Signal<String>,
-    mut room_sessions: Signal<Vec<RoomSession>>,
+    room_sessions: Signal<Vec<RoomSession>>,
     mut room_name: Signal<String>,
     mut active_room_code: Signal<String>,
     mut room_role: Signal<String>,
@@ -2333,16 +2317,8 @@ fn join_room(
         return;
     }
     spawn(async move {
-        match browser::room_request::<RoomResult>(
-            &url,
-            "/parties/join",
-            "POST",
-            &serde_json::json!({"code":code,"username":name}),
-            &token,
-            "",
-        )
-        .await
-        {
+        let client = browser::RoomClient::new(&url, &token);
+        match client.join(&code, &name).await {
             Ok(room) => {
                 let party = room.party.unwrap_or_default();
                 let socket_permissions = party.permissions.clone();
@@ -2380,6 +2356,7 @@ fn join_room(
                     &room.code,
                     &name,
                     &token,
+                    &room_host_token(),
                     "guest",
                     &socket_permissions,
                 ) {
@@ -2427,16 +2404,8 @@ fn create_room(
         return;
     }
     spawn(async move {
-        match browser::room_request::<RoomResult>(
-            &url,
-            "/parties",
-            "POST",
-            &serde_json::json!({"host":name}),
-            &token,
-            "",
-        )
-        .await
-        {
+        let client = browser::RoomClient::new(&url, &token);
+        match client.create(&name).await {
             Ok(room) => {
                 if room.host_token.is_empty() {
                     notice.set("The room server did not return host authorization.".to_string());
@@ -2470,6 +2439,7 @@ fn create_room(
                     &room.code,
                     &name,
                     &token,
+                    &room_host_token(),
                     "host",
                     &socket_permissions,
                 ) {
@@ -2624,16 +2594,8 @@ fn refresh_room(
     let access = room_access();
     let host = host_token();
     spawn(async move {
-        match browser::room_request::<RoomParty>(
-            &url,
-            &format!("/parties/{}", code),
-            "GET",
-            &serde_json::json!({}),
-            &access,
-            &host,
-        )
-        .await
-        {
+        let client = browser::RoomClient::new(&url, &access);
+        match client.read(&code, &host).await {
             Ok(party) => {
                 members.set(party.members);
                 permissions.set(party.permissions);
@@ -2667,25 +2629,14 @@ fn end_room(
     if code.is_empty() {
         return;
     }
-    let (path, method, body, auth) = if role == "host" {
-        (
-            format!("/parties/{code}"),
-            "DELETE",
-            serde_json::json!({"username":name}),
-            host,
-        )
-    } else {
-        (
-            format!("/parties/{code}/leave"),
-            "POST",
-            serde_json::json!({"username":name}),
-            String::new(),
-        )
-    };
     spawn(async move {
-        match browser::room_request::<serde_json::Value>(&url, &path, method, &body, &access, &auth)
-            .await
-        {
+        let client = browser::RoomClient::new(&url, &access);
+        let result = if role == "host" {
+            client.end(&code, &host).await
+        } else {
+            client.leave(&code, &name).await
+        };
+        match result {
             Ok(_) => {
                 let mut cleanup_error = persist_active_room_session(&RoomSession::default()).err();
                 if role == "guest" {
@@ -2906,7 +2857,7 @@ async fn room_sync_loop(
     mut room_members: Signal<Vec<String>>,
     mut room_permissions: Signal<RoomPermissions>,
     mut room_shared_playlists: Signal<Vec<RoomSharedPlaylist>>,
-    mut room_sessions: Signal<Vec<RoomSession>>,
+    room_sessions: Signal<Vec<RoomSession>>,
     playlists: Signal<Vec<Playlist>>,
     mut queue: Signal<Vec<Track>>,
     mut current: Signal<Option<Track>>,
@@ -2925,7 +2876,6 @@ async fn room_sync_loop(
     let mut last_playback_track = String::new();
     let mut last_playback_state = false;
     let mut last_progress_sent = 0.0;
-    let mut last_host_sync_attempt = 0.0;
     loop {
         sleep_ms(150).await;
         let code = active_room_code();
@@ -2941,8 +2891,8 @@ async fn room_sync_loop(
         let host_token = room_host_token();
         let name = room_name();
         let now = now_epoch_millis() as f64;
-        let mut force_rest_sync = false;
         let mut pending_playback_control = None;
+        let mut pushed_party = None;
 
         match browser::drain_room_events().await {
             Ok(events) => {
@@ -2955,7 +2905,7 @@ async fn room_sync_loop(
                             room_permissions.set(party.permissions.clone());
                             room_shared_playlists.set(party.playlists.clone());
                             if role == "guest" {
-                                force_rest_sync = true;
+                                pushed_party = Some(party);
                             }
                         }
                     } else if role == "guest"
@@ -3028,7 +2978,6 @@ async fn room_sync_loop(
                             }
                         }
                     } else if role == "host" && event.event == "room-command" {
-                        force_rest_sync = true;
                         apply_host_room_command(
                             event.data,
                             &room_members(),
@@ -3044,17 +2993,26 @@ async fn room_sync_loop(
                             history,
                             notice,
                         );
-                    } else if event.event == "room-closed" && role == "guest" {
-                        let queue_restore_error = restore_guest_queue(queue).err();
+                    } else if event.event == "room-closed" {
+                        let queue_restore_error = if role == "guest" {
+                            restore_guest_queue(queue).err()
+                        } else {
+                            None
+                        };
                         active_room_code.set(String::new());
                         room_role.set(String::new());
+                        room_host_token.set(String::new());
                         room_members.set(Vec::new());
                         room_permissions.set(RoomPermissions::default());
                         room_shared_playlists.set(Vec::new());
                         notice.set(queue_restore_error.map_or_else(
-                            || "The room was closed by its host.".to_string(),
+                            || if role == "guest" {
+                                "The room was closed by its host.".to_string()
+                            } else {
+                                "The room expired after its last listener disconnected.".to_string()
+                            },
                             |error| format!(
-                                "The room was closed by its host. Queue restoration failed: {error}"
+                                "The room ended. Queue restoration failed: {error}"
                             ),
                         ));
                         clear_saved_room_session(room_sessions, &url, &code, notice);
@@ -3110,9 +3068,6 @@ async fn room_sync_loop(
                         }
                     } else {
                         pending_playback_control = Some((track_id.clone(), playing(), control));
-                        if now - last_host_sync_attempt >= 1500.0 {
-                            force_rest_sync = true;
-                        }
                     }
                 }
                 if track_id == last_playback_track && playing() && now - last_progress_sent >= 250.0
@@ -3139,13 +3094,14 @@ async fn room_sync_loop(
             }
         }
 
-        if !force_rest_sync && now < next_rest_sync {
-            continue;
+        if role == "host" {
+            if now < next_rest_sync {
+                continue;
+            }
+            next_rest_sync = now + 1500.0;
         }
-        next_rest_sync = now + 1500.0;
 
         if role == "host" {
-            last_host_sync_attempt = now;
             if let Err(error) =
                 upload_room_queue_tracks(&url, &code, &host_token, queue, current, local_tracks)
                     .await
@@ -3184,16 +3140,8 @@ async fn room_sync_loop(
                 "permissions": room_permissions(),
                 "syncRevision": now_epoch,
             });
-            match browser::room_request::<RoomParty>(
-                &url,
-                &format!("/parties/{code}"),
-                "PUT",
-                &update,
-                &access,
-                &host_token,
-            )
-            .await
-            {
+            let client = browser::RoomClient::new(&url, &access);
+            match client.update(&code, &update, &host_token).await {
                 Ok(party) => {
                     room_members.set(party.members);
                     room_permissions.set(party.permissions);
@@ -3243,129 +3191,103 @@ async fn room_sync_loop(
             }
         }
 
-        match browser::room_request::<RoomParty>(
-            &url,
-            &format!("/parties/{code}"),
-            "GET",
-            &serde_json::json!({}),
-            &access,
-            &host_token,
-        )
-        .await
-        {
-            Ok(party) => {
-                last_error.clear();
-                if !party.members.iter().any(|member| member == &name) {
-                    let queue_restore_error = if role == "guest" {
-                        restore_guest_queue(queue).err()
-                    } else {
-                        None
-                    };
-                    active_room_code.set(String::new());
-                    room_role.set(String::new());
-                    room_host_token.set(String::new());
-                    room_members.set(Vec::new());
-                    room_permissions.set(RoomPermissions::default());
-                    room_shared_playlists.set(Vec::new());
-                    notice.set(queue_restore_error.map_or_else(
-                        || "You are no longer a member of this room.".to_string(),
-                        |error| format!(
-                            "You are no longer a member of this room. Queue restoration failed: {error}"
-                        ),
-                    ));
-                    clear_saved_room_session(room_sessions, &url, &code, notice);
-                    continue;
-                }
-                room_members.set(party.members.clone());
-                room_permissions.set(party.permissions);
-                room_shared_playlists.set(party.playlists);
-                if role != "guest" {
-                    continue;
-                }
-                shuffle.set(party.shuffle);
-                if matches!(party.repeat_mode.as_str(), "off" | "all" | "one") {
-                    repeat_mode.set(party.repeat_mode);
-                } else {
-                    repeat_mode.set("off".to_string());
-                }
+        if role == "host" {
+            continue;
+        }
 
-                queue.set(party.queue.clone());
-                if let Err(error) = browser::save("wavelength-queue", &party.queue) {
-                    notice.set(error);
-                }
-                if party.current_track_id.is_empty() {
-                    if current().is_some() {
-                        let _ = browser::pause();
-                        current.set(None);
-                        audio_src.set(String::new());
-                        playing.set(false);
-                        playhead.set(0.0);
-                    }
-                    continue;
-                }
-                let track = party
-                    .queue
-                    .iter()
-                    .chain(local_tracks().iter())
-                    .find(|track| track.key() == party.current_track_id)
-                    .cloned();
-                let Some(track) = track else {
-                    if last_error != "The room's current track is unavailable." {
-                        notice.set("The room's current track is unavailable.".to_string());
-                        last_error = "The room's current track is unavailable.".to_string();
-                    }
-                    continue;
-                };
-                let needs_track = current()
-                    .as_ref()
-                    .is_none_or(|active| active.key() != party.current_track_id);
-                if needs_track {
-                    play_track_direct(track, current, audio_src, playing, queue, history, notice);
-                    continue;
-                }
-                let target_time = if party.is_playing {
-                    party
-                        .start_epoch
-                        .map(|start| ((now_epoch_millis() - start).max(0)) as f64 / 1000.0)
-                        .unwrap_or(party.paused_at.max(0.0))
-                } else {
-                    party.paused_at.max(0.0)
-                };
-                if (playhead() - target_time).abs() > 0.75 {
-                    playhead.set(target_time);
-                    browser::seek(target_time);
-                }
-                if party.is_playing != playing() {
-                    if party.is_playing {
-                        match browser::play() {
-                            Ok(()) => playing.set(true),
-                            Err(error) => notice.set(error),
-                        }
-                    } else {
-                        let _ = browser::pause();
-                        playing.set(false);
-                    }
-                }
+        let Some(party) = pushed_party else {
+            continue;
+        };
+        last_error.clear();
+        if !party.members.iter().any(|member| member == &name) {
+            let queue_restore_error = if role == "guest" {
+                restore_guest_queue(queue).err()
+            } else {
+                None
+            };
+            active_room_code.set(String::new());
+            room_role.set(String::new());
+            room_host_token.set(String::new());
+            room_members.set(Vec::new());
+            room_permissions.set(RoomPermissions::default());
+            room_shared_playlists.set(Vec::new());
+            notice.set(queue_restore_error.map_or_else(
+                || "You are no longer a member of this room.".to_string(),
+                |error| format!(
+                    "You are no longer a member of this room. Queue restoration failed: {error}"
+                ),
+            ));
+            clear_saved_room_session(room_sessions, &url, &code, notice);
+            continue;
+        }
+        room_members.set(party.members.clone());
+        room_permissions.set(party.permissions);
+        room_shared_playlists.set(party.playlists);
+        if role != "guest" {
+            continue;
+        }
+        shuffle.set(party.shuffle);
+        if matches!(party.repeat_mode.as_str(), "off" | "all" | "one") {
+            repeat_mode.set(party.repeat_mode);
+        } else {
+            repeat_mode.set("off".to_string());
+        }
+
+        queue.set(party.queue.clone());
+        if let Err(error) = browser::save("wavelength-queue", &party.queue) {
+            notice.set(error);
+        }
+        if party.current_track_id.is_empty() {
+            if current().is_some() {
+                let _ = browser::pause();
+                current.set(None);
+                audio_src.set(String::new());
+                playing.set(false);
+                playhead.set(0.0);
             }
-            Err(error) => {
-                if last_error != error {
-                    notice.set(format!("Room connection failed: {error}"));
-                    last_error = error.clone();
+            continue;
+        }
+        let track = party
+            .queue
+            .iter()
+            .chain(local_tracks().iter())
+            .find(|track| track.key() == party.current_track_id)
+            .cloned();
+        let Some(track) = track else {
+            if last_error != "The room's current track is unavailable." {
+                notice.set("The room's current track is unavailable.".to_string());
+                last_error = "The room's current track is unavailable.".to_string();
+            }
+            continue;
+        };
+        let needs_track = current()
+            .as_ref()
+            .is_none_or(|active| active.key() != party.current_track_id);
+        if needs_track {
+            play_track_direct(track, current, audio_src, playing, queue, history, notice);
+            continue;
+        }
+        let target_time = if party.is_playing {
+            party
+                .start_epoch
+                .map(|start| ((now_epoch_millis() - start).max(0)) as f64 / 1000.0)
+                .unwrap_or(party.paused_at.max(0.0))
+        } else {
+            party.paused_at.max(0.0)
+        };
+        if (playhead() - target_time).abs() > 0.75 {
+            playhead.set(target_time);
+            browser::seek(target_time);
+        }
+        if party.is_playing != playing() {
+            if party.is_playing {
+                match browser::play() {
+                    Ok(()) => playing.set(true),
+                    Err(error) => notice.set(error),
                 }
-                if error == "Room not found" {
-                    if role == "guest" {
-                        if let Err(restore_error) = restore_guest_queue(queue) {
-                            notice.set(restore_error);
-                        }
-                    }
-                    active_room_code.set(String::new());
-                    room_role.set(String::new());
-                    room_host_token.set(String::new());
-                    room_members.set(Vec::new());
-                    room_permissions.set(RoomPermissions::default());
-                    room_shared_playlists.set(Vec::new());
-                    clear_saved_room_session(room_sessions, &url, &code, notice);
-                }
+            } else {
+                let _ = browser::pause();
+                playing.set(false);
             }
         }
     }

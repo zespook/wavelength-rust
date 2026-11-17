@@ -941,7 +941,7 @@ export async function roomRequest(url, path, method, body, access, host) {
     const requestMethod = method.toUpperCase();
     const request = { method: requestMethod, headers, credentials: "omit" };
     if (requestMethod !== "GET" && requestMethod !== "HEAD") request.body = body;
-    response = await fetch(`${url.replace(/\/+$/, "")}/api${path}`, request);
+    response = await fetch(`${url.replace(/\/+$/, "")}/api/v2${path}`, request);
   } catch (error) {
     if (error instanceof TypeError) {
       throw new Error("Could not reach the room server. Check its URL and port, confirm it is running, and make sure its CORS settings allow this app.");
@@ -1001,9 +1001,13 @@ let roomSocketConfig = null;
 let roomSocketReady = false;
 let roomSocketEvents = [];
 let roomSocketRetry = null;
-export function connectRoomSocket(url, code, username, accessToken, role, permissions) {
+let roomSocketRetryDelay = 2000;
+let roomSocketId = null;
+export function connectRoomSocket(url, code, username, accessToken, hostToken, role, permissions) {
   disconnectRoomSocket();
-  roomSocketConfig = { url, code, username, accessToken, role, permissions };
+  roomSocketRetryDelay = 2000;
+  roomSocketId = null;
+  roomSocketConfig = { url, code, username, accessToken, hostToken, role, permissions };
   roomSocketEvents = [];
   openRoomSocket();
   return true;
@@ -1011,58 +1015,90 @@ export function connectRoomSocket(url, code, username, accessToken, role, permis
 function openRoomSocket() {
   if (!roomSocketConfig) return;
   const config = roomSocketConfig;
-  const endpoint = new URL("/socket.io/", config.url);
+  roomRequest(
+    config.url,
+    `/rooms/${encodeURIComponent(config.code)}/socket-ticket`,
+    "POST",
+    JSON.stringify({ username: config.username }),
+    config.accessToken,
+    config.hostToken
+  ).then(({ ticket }) => {
+    if (roomSocketConfig !== config) return;
+    if (typeof ticket !== "string" || !ticket) throw new Error("Room server did not issue a connection ticket.");
+    openRoomWebSocket(config, ticket);
+  }).catch(error => {
+    if (roomSocketConfig !== config) return;
+    if (error.message === "Room not found") {
+      roomSocketEvents.push({ event: "room-closed", data: config.code });
+      return;
+    }
+    roomSocketEvents.push({ event: "error", data: error.message || "Room connection could not be authorized." });
+    scheduleRoomSocketRetry(config);
+  });
+}
+function openRoomWebSocket(config, ticket) {
+  const endpoint = new URL(`/api/v2/rooms/${encodeURIComponent(config.code)}/socket`, config.url);
   endpoint.protocol = endpoint.protocol === "https:" ? "wss:" : "ws:";
-  endpoint.search = new URLSearchParams({ EIO: "4", transport: "websocket" }).toString();
-  const socket = new WebSocket(endpoint);
+  endpoint.search = new URLSearchParams({ ticket }).toString();
+  let socket;
+  try {
+    socket = new WebSocket(endpoint);
+  } catch (error) {
+    roomSocketEvents.push({ event: "error", data: error.message || "Room socket could not be opened." });
+    scheduleRoomSocketRetry(config);
+    return;
+  }
   roomSocket = socket;
   roomSocketReady = false;
-  socket.onmessage = event => {
-    const packet = String(event.data);
-    if (packet.startsWith("0")) {
-      socket.send(`40${JSON.stringify({
-        code: config.code,
-        username: config.username,
-        accessToken: config.accessToken
-      })}`);
-      return;
-    }
-    if (packet === "2") {
-      socket.send("3");
-      return;
-    }
-    if (packet.startsWith("40")) {
-      roomSocketReady = true;
-      roomSocketEvents.push({ event: "connect", data: null });
-      return;
-    }
-    if (!packet.startsWith("42")) return;
+  socket.onopen = () => {
+    if (roomSocket !== socket) return;
+    roomSocketReady = true;
+    roomSocketEvents.push({ event: "connect", data: null });
+  };
+  socket.onmessage = ({ data }) => {
+    if (roomSocket !== socket || typeof data !== "string") return;
     try {
-      const [name, data] = JSON.parse(packet.slice(2));
-      if (name === "room-state" && data?.permissions) {
-        config.permissions = data.permissions;
+      const message = JSON.parse(data);
+      if (message.event === "connected" && typeof message.data?.socketId === "string") {
+        roomSocketId = message.data.socketId;
+        return;
       }
-      roomSocketEvents.push({ event: name, data });
+      if (message.sender && message.sender === roomSocketId) return;
+      if (message.event === "room-state") roomSocketRetryDelay = 2000;
+      if (message.event === "room-state" && message.data?.permissions) {
+        config.permissions = message.data.permissions;
+      }
+      if (typeof message.event === "string") {
+        roomSocketEvents.push({ event: message.event, data: message.data ?? null });
+      }
     } catch (error) {
       console.error("Could not decode a room event.", error);
     }
   };
   socket.onerror = () => roomSocketEvents.push({
     event: "error",
-    data: "Room socket connection failed. Check that the server or proxy allows WebSocket upgrades on /socket.io/."
+    data: "Room socket connection failed. Check that the server or proxy allows WebSocket upgrades on /api/v2/rooms/{code}/socket."
   });
   socket.onclose = () => {
     if (roomSocket !== socket) return;
     roomSocketReady = false;
     roomSocketEvents.push({ event: "disconnect", data: null });
     roomSocket = null;
-    if (roomSocketConfig === config) {
-      roomSocketRetry = window.setTimeout(openRoomSocket, 2000);
-    }
+    scheduleRoomSocketRetry(config);
   };
+}
+function scheduleRoomSocketRetry(config) {
+  if (roomSocketConfig !== config) return;
+  const delay = roomSocketRetryDelay;
+  roomSocketRetryDelay = Math.min(roomSocketRetryDelay * 2, 30000);
+  roomSocketRetry = window.setTimeout(() => {
+    roomSocketRetry = null;
+    openRoomSocket();
+  }, delay);
 }
 export function disconnectRoomSocket() {
   roomSocketConfig = null;
+  roomSocketId = null;
   roomSocketReady = false;
   if (roomSocketRetry) window.clearTimeout(roomSocketRetry);
   roomSocketRetry = null;
@@ -1081,24 +1117,25 @@ export function emitRoomCommand(action, details) {
       ? "canManageQueue"
       : "canControlPlayback";
   if (!roomSocketConfig.permissions?.[permission]) return "permission-denied";
-  roomSocket.send(`42${JSON.stringify(["room-command", { action, ...details }])}`);
+  roomSocket.send(JSON.stringify({ event: "room-command", data: { action, ...details } }));
   return "sent";
 }
 export function emitRoomPlaybackControl(control) {
   if (!roomSocketConfig || roomSocketConfig.role !== "host") return "not-host";
   if (!roomSocket || roomSocket.readyState !== WebSocket.OPEN || !roomSocketReady) return "unavailable";
-  roomSocket.send(`42${JSON.stringify(["playback-control", control])}`);
+  roomSocket.send(JSON.stringify({ event: "playback-control", data: control }));
   return "sent";
 }
 export function emitRoomPlaybackProgress(progress) {
   if (!roomSocketConfig || roomSocketConfig.role !== "host") return "not-host";
   if (!roomSocket || roomSocket.readyState !== WebSocket.OPEN || !roomSocketReady) return "unavailable";
-  roomSocket.send(`42${JSON.stringify(["playback-progress", progress])}`);
+  roomSocket.send(JSON.stringify({ event: "playback-progress", data: progress }));
   return "sent";
 }
 export function drainRoomEvents() {
   return roomSocketEvents.splice(0, roomSocketEvents.length);
 }
+
 export async function uploadRoomTrack(url, code, trackId, hostToken) {
   const file = files.get(trackId);
   if (!file) throw new Error("The local audio file is no longer available in this browser.");
@@ -1106,7 +1143,7 @@ export async function uploadRoomTrack(url, code, trackId, hostToken) {
   if (!["mp3", "flac", "m4a", "ogg", "wav", "aac", "opus"].includes(extension)) {
     throw new Error("This local audio format cannot be shared with the room.");
   }
-  const response = await fetch(`${url.replace(/\/+$/, "")}/api/parties/${encodeURIComponent(code)}/audio`, {
+  const response = await fetch(`${url.replace(/\/+$/, "")}/api/v2/rooms/${encodeURIComponent(code)}/audio`, {
     method: "POST",
     headers: { Authorization: `Bearer ${hostToken}`, "x-audio-extension": extension },
     body: file
@@ -1129,7 +1166,7 @@ export function hasLocalAudioFile(trackId) {
 export async function roomAudioUrl(audioId) {
   if (!roomSocketConfig) throw new Error("This track is not attached to an active room.");
   const { url, code, accessToken } = roomSocketConfig;
-  const path = `/api/parties/${encodeURIComponent(code)}/audio/${encodeURIComponent(audioId)}/access`;
+  const path = `/api/v2/rooms/${encodeURIComponent(code)}/audio/${encodeURIComponent(audioId)}/access`;
   const response = await fetch(`${url.replace(/\/+$/, "")}${path}`, {
     headers: { "x-room-access-token": accessToken },
     credentials: "omit"

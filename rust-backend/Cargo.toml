@@ -5,7 +5,7 @@ edition = "2021"
 autobins = false
 
 [dependencies]
-axum = "0.7"
+axum = { version = "0.7", features = ["ws"] }
 tokio = { version = "1", features = ["full"] }
 mongodb = "3.1"
 serde = { version = "1", features = ["derive"] }
@@ -19,7 +19,6 @@ base64 = "0.22"
 subtle = "2.6"
 sha2 = "0.10"
 bcrypt = "0.15"
-socketioxide = { version = "0.15.1", features = ["tracing"] }
 tower-http = { version = "0.5", features = ["cors"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

@@ -1,6 +1,6 @@
 use axum::{
     body::Body,
-    extract::{rejection::JsonRejection, ConnectInfo, DefaultBodyLimit, Extension, Path, Query, State},
+    extract::{rejection::JsonRejection, ws::{Message, WebSocket, WebSocketUpgrade}, ConnectInfo, DefaultBodyLimit, Path, Query, State},
     http::{header::{ACCEPT_RANGES, AUTHORIZATION, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, COOKIE, RANGE, RETRY_AFTER, SET_COOKIE}, HeaderMap, HeaderName, HeaderValue, Request, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
@@ -8,19 +8,20 @@ use axum::{
     Json, Router,
 };
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
-use futures_util::StreamExt;
-use mongodb::{bson::{doc, Document}, options::ReturnDocument, Client, Collection, Database};
+use futures_util::{SinkExt, StreamExt};
+use mongodb::{bson::{doc, Document}, options::ReturnDocument, Client, Database};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use socketioxide::{extract::{Data, SocketRef}, SocketIo};
 use std::{collections::{HashMap, HashSet, VecDeque}, env, net::{IpAddr, SocketAddr}, path::PathBuf, sync::Arc, time::{Duration, Instant, SystemTime, UNIX_EPOCH}};
 use subtle::ConstantTimeEq;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, SeekFrom};
-use tokio::sync::Mutex;
+use tokio::sync::{broadcast, Mutex};
 use tokio_util::io::ReaderStream;
 use tower_http::cors::CorsLayer;
 use tracing::info;
+mod room_service;
+use room_service::RoomService;
 
 const ALPHABET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 const ROOM_CODE_LENGTH: usize = 4;
@@ -30,7 +31,6 @@ const MAX_RATE_LIMIT_CLIENTS: usize = 10_000;
 const MAX_ROOM_UPDATE_BYTES: usize = 8 * 1024 * 1024;
 const ROOM_ACCESS_TTL: Duration = Duration::from_secs(12 * 60 * 60);
 const ROOM_IDLE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
-const ROOM_ACTIVITY_REFRESH: Duration = Duration::from_secs(30);
 const ROOM_CLEANUP_INTERVAL: Duration = Duration::from_secs(10);
 const RATE_LIMIT_WINDOW: Duration = Duration::from_secs(60);
 const SHARED_AUDIO_ACCESS_TTL: Duration = Duration::from_secs(30 * 60);
@@ -39,10 +39,8 @@ const ROOM_ACCESS_REQUIRED_MESSAGE: &str = "Enter the server passcode in Setting
 #[derive(Clone)]
 struct AppState {
     database: Database,
-    parties: Collection<Party>,
-    party_auth: Collection<PartyAuth>,
+    rooms: RoomService,
     http: reqwest::Client,
-    audio_root: PathBuf,
     spotify_states: Arc<Mutex<HashMap<String, SpotifyOAuthState>>>,
     spotify_sessions: Arc<Mutex<HashMap<String, SpotifySession>>>,
     spotify_handoffs: Arc<Mutex<HashMap<String, SpotifyHandoff>>>,
@@ -190,6 +188,7 @@ struct Party {
     #[serde(default)] permissions: Permissions,
     #[serde(default)] sync_revision: i64,
     #[serde(default)] updated_at: i64,
+    #[serde(default)] empty_since: Option<i64>,
 }
 
 fn off() -> String { "off".into() }
@@ -215,10 +214,19 @@ struct JoinInput {
 
 #[derive(Deserialize)]
 struct RoomSocketAuth {
-    code: String,
+    ticket: String,
+}
+
+#[derive(Deserialize)]
+struct RoomSocketTicketInput {
     username: String,
-    #[serde(rename = "accessToken")]
-    access_token: String,
+}
+
+#[derive(Deserialize)]
+struct RoomSocketMessage {
+    event: String,
+    #[serde(default)]
+    data: serde_json::Value,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -343,11 +351,12 @@ fn generate_room_code() -> String {
     let mut rng = rand::thread_rng();
     (0..ROOM_CODE_LENGTH).map(|_| ALPHABET[rng.gen_range(0..ALPHABET.len())] as char).collect()
 }
-fn room_idle_cutoff(current_time: i64) -> i64 {
+fn room_empty_cutoff(current_time: i64) -> i64 {
     current_time.saturating_sub(ROOM_IDLE_TIMEOUT.as_millis() as i64)
 }
-fn room_is_idle(updated_at: i64, current_time: i64) -> bool {
-    updated_at <= room_idle_cutoff(current_time)
+
+fn room_empty_timeout_expired(empty_since: Option<i64>, current_time: i64) -> bool {
+    empty_since.is_some_and(|empty_since| empty_since <= room_empty_cutoff(current_time))
 }
 fn token_hash(token: &str) -> String { BASE64.encode(Sha256::digest(token.as_bytes())) }
 
@@ -461,20 +470,30 @@ fn token_matches(candidate: &str, expected_hash: &str) -> bool {
 }
 
 fn public_api_request(method: &axum::http::Method, path: &str) -> bool {
-    let path = path.strip_prefix("/api").unwrap_or(path);
-    (method == axum::http::Method::POST && path == "/auth/session")
+    let path = path.strip_prefix("/api/v2").or_else(|| path.strip_prefix("/api")).unwrap_or(path);
+    (method == axum::http::Method::POST && path == "/session")
         || (method == axum::http::Method::GET
-            && matches!(path, "/spotify/login" | "/spotify/callback"))
+            && (matches!(path, "/spotify/login" | "/spotify/callback")
+                || (path.starts_with("/rooms/") && path.ends_with("/socket"))))
 }
 
 fn is_shared_audio_stream_path(method: &axum::http::Method, path: &str) -> bool {
-    let path = path.strip_prefix("/api").unwrap_or(path);
+    let path = path.strip_prefix("/api/v2").or_else(|| path.strip_prefix("/api")).unwrap_or(path);
     let segments = path.split('/').filter(|segment| !segment.is_empty()).collect::<Vec<_>>();
     method == axum::http::Method::GET
         && segments.len() == 4
-        && segments[0] == "parties"
+        && segments[0] == "rooms"
         && segments[2] == "audio"
         && parse_audio_id(segments[3]).is_some()
+}
+
+fn is_shared_audio_upload_path(method: &axum::http::Method, path: &str) -> bool {
+    let path = path.strip_prefix("/api/v2").unwrap_or(path);
+    let segments = path.split('/').filter(|segment| !segment.is_empty()).collect::<Vec<_>>();
+    method == axum::http::Method::POST
+        && segments.len() == 3
+        && segments[0] == "rooms"
+        && segments[2] == "audio"
 }
 
 fn shared_audio_grant_matches(
@@ -513,7 +532,9 @@ async fn require_room_access(
     {
         return next.run(request).await;
     }
-    if is_shared_audio_stream_path(request.method(), request.uri().path()) {
+    if is_shared_audio_stream_path(request.method(), request.uri().path())
+        || is_shared_audio_upload_path(request.method(), request.uri().path())
+    {
         return next.run(request).await;
     }
     let token = request.headers().get("x-room-access-token")
@@ -582,7 +603,7 @@ async fn create_shared_audio_access(
         expires_at,
     });
     json(serde_json::json!({
-        "url": format!("/api/parties/{}/audio/{}?access={token}", party.code, audio_id),
+        "url": format!("/api/v2/rooms/{}/audio/{}?access={token}", party.code, audio_id),
         "expiresAt": expires_at
     }))
 }
@@ -1130,13 +1151,15 @@ async fn find_party(state: &AppState, raw_code: &str) -> Result<Party, Response>
     if !valid_room_code(&party_code) {
         return Err(failure(StatusCode::BAD_REQUEST, "Room code must be 4 to 6 or 12 letters or numbers"));
     }
-    let party = state.parties.find_one(doc! { "code": &party_code }).await
+    let party = state.rooms.parties().find_one(doc! { "code": &party_code }).await
         .map_err(|error| {
             tracing::error!(room_code = %party_code, %error, "Room lookup failed");
             failure(StatusCode::SERVICE_UNAVAILABLE, "Room data is temporarily unavailable")
         })?
         .ok_or_else(|| failure(StatusCode::NOT_FOUND, "Room not found"))?;
-    if room_is_idle(party.updated_at, now()) {
+    if room_empty_timeout_expired(party.empty_since, now())
+        && !state.rooms.has_live_sockets(&party.code).await
+    {
         return Err(failure(StatusCode::NOT_FOUND, "Room not found"));
     }
     Ok(party)
@@ -1166,7 +1189,7 @@ async fn host_authorized(state: &AppState, room_code: &str, headers: &HeaderMap)
     let Some(token) = headers.get(AUTHORIZATION).and_then(|value| value.to_str().ok())
         .and_then(|value| value.strip_prefix("Bearer ")) else { return Ok(false); };
     if token.len() != 64 || !token.is_ascii() { return Ok(false); }
-    match state.party_auth.find_one(doc! { "code": normalize_code(room_code) }).await {
+    match state.rooms.party_auth().find_one(doc! { "code": normalize_code(room_code) }).await {
         Ok(Some(auth)) => Ok(token_matches(token, &auth.token_hash)),
         Ok(None) => Ok(false),
         Err(error) => {
@@ -1184,19 +1207,20 @@ async fn create_room(State(state): State<AppState>, Json(input): Json<CreateInpu
 
     for _ in 0..10 {
         let room_code = generate_room_code();
-        if state.parties.find_one(doc! { "code": &room_code }).await.ok().flatten().is_some() { continue; }
+        if state.rooms.parties().find_one(doc! { "code": &room_code }).await.ok().flatten().is_some() { continue; }
         let party = Party {
             code: room_code.clone(),
             host: host.clone(),
             members: vec![host.clone()],
             updated_at: now(),
+            empty_since: Some(now()),
             ..Default::default()
         };
-        if state.parties.insert_one(&party).await.is_err() { continue; }
+        if state.rooms.parties().insert_one(&party).await.is_err() { continue; }
         let host_token = random_token(64);
         let auth = PartyAuth { code: room_code.clone(), token_hash: token_hash(&host_token) };
-        if state.party_auth.insert_one(auth).await.is_err() {
-            let _ = state.parties.delete_one(doc! { "code": &room_code }).await;
+        if state.rooms.party_auth().insert_one(auth).await.is_err() {
+            let _ = state.rooms.parties().delete_one(doc! { "code": &room_code }).await;
             return failure(StatusCode::INTERNAL_SERVER_ERROR, "Room authorization could not be stored");
         }
         return json(serde_json::json!({ "code": room_code, "party": party, "hostToken": host_token }));
@@ -1204,13 +1228,8 @@ async fn create_room(State(state): State<AppState>, Json(input): Json<CreateInpu
     failure(StatusCode::CONFLICT, "Unable to generate a unique room code")
 }
 
-fn room_socket_channel(room_code: &str) -> String {
-    format!("party:{}", normalize_code(room_code))
-}
-
 async fn join_room(
     State(state): State<AppState>,
-    Extension(io): Extension<SocketIo>,
     ConnectInfo(address): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Json(input): Json<JoinInput>,
@@ -1227,7 +1246,7 @@ async fn join_room(
     if party.host.eq_ignore_ascii_case(&name) {
         return failure(StatusCode::CONFLICT, "The room host cannot join their own room as a guest");
     }
-    match state.parties.update_one(
+    match state.rooms.parties().update_one(
         doc! { "code": &party.code },
         doc! { "$addToSet": { "members": &name }, "$set": { "updatedAt": now() } },
     ).await {
@@ -1239,11 +1258,11 @@ async fn join_room(
         }
     }
     let party = match find_party(&state, &party.code).await { Ok(party) => party, Err(error) => return error };
-    io.to(room_socket_channel(&party.code)).emit("room-state", &party).ok();
+    state.rooms.publish(&party.code, "room-state", &party).await;
     json(serde_json::json!({ "code": party.code, "party": party }))
 }
 
-async fn leave_room(State(state): State<AppState>, Path(room_code): Path<String>, Extension(io): Extension<SocketIo>, Json(input): Json<LeaveInput>) -> Response {
+async fn leave_room(State(state): State<AppState>, Path(room_code): Path<String>, Json(input): Json<LeaveInput>) -> Response {
     let name = clean(input.username.as_deref().unwrap_or(""));
     if name.is_empty() || name.len() > 50 {
         return failure(StatusCode::BAD_REQUEST, "A valid listener name is required");
@@ -1252,13 +1271,13 @@ async fn leave_room(State(state): State<AppState>, Path(room_code): Path<String>
     if party.host == name {
         return failure(StatusCode::BAD_REQUEST, "The host must end the session instead of leaving it");
     }
-    match state.parties.update_one(
+    match state.rooms.parties().update_one(
         doc! { "code": &party.code },
         doc! { "$pull": { "members": &name }, "$set": { "updatedAt": now() } },
     ).await {
         Ok(result) if result.matched_count == 1 => {
-            if let Ok(Some(updated)) = state.parties.find_one(doc! { "code": &party.code }).await {
-                io.to(room_socket_channel(&party.code)).emit("room-state", &updated).ok();
+            if let Ok(Some(updated)) = state.rooms.parties().find_one(doc! { "code": &party.code }).await {
+                state.rooms.publish(&party.code, "room-state", &updated).await;
             }
             json(serde_json::json!({ "left": true }))
         }
@@ -1282,18 +1301,6 @@ async fn read_room(
     }
     match find_party(&state, &room_code).await {
         Ok(party) => {
-            let current_time = now();
-            if current_time.saturating_sub(party.updated_at)
-                >= ROOM_ACTIVITY_REFRESH.as_millis() as i64
-            {
-                if let Err(error) = state.parties.update_one(
-                    doc! { "code": &party.code, "updatedAt": party.updated_at },
-                    doc! { "$set": { "updatedAt": current_time } },
-                ).await {
-                    tracing::error!(room_code = %party.code, %error, "Room activity could not be refreshed");
-                    return failure(StatusCode::SERVICE_UNAVAILABLE, "Room activity could not be refreshed");
-                }
-            }
             let authorized = match host_authorized(&state, &party.code, &headers).await {
                 Ok(authorized) => authorized,
                 Err(error) => return error,
@@ -1310,7 +1317,6 @@ async fn update_room(
     State(state): State<AppState>,
     Path(room_code): Path<String>,
     headers: HeaderMap,
-    Extension(io): Extension<SocketIo>,
     body: Result<Json<UpdateInput>, JsonRejection>,
 ) -> Response {
     let Json(input) = match body {
@@ -1351,10 +1357,10 @@ async fn update_room(
     if update_size > MAX_ROOM_UPDATE_BYTES {
         return failure(StatusCode::PAYLOAD_TOO_LARGE, "Room update exceeds the 8 MiB data limit");
     }
-    match state.parties.find_one_and_update(room_update_filter(&party.code, input.sync_revision), update)
+    match state.rooms.parties().find_one_and_update(room_update_filter(&party.code, input.sync_revision), update)
         .return_document(ReturnDocument::After).await {
         Ok(Some(updated)) => {
-            io.to(room_socket_channel(&party.code)).emit("room-state", &updated).ok();
+            state.rooms.publish(&party.code, "room-state", &updated).await;
             json(updated)
         }
         Ok(None) => match find_party(&state, &party.code).await {
@@ -1368,21 +1374,290 @@ async fn update_room(
     }
 }
 
-async fn close_room(State(state): State<AppState>, Path(room_code): Path<String>, headers: HeaderMap, Extension(io): Extension<SocketIo>) -> Response {
+async fn close_room(State(state): State<AppState>, Path(room_code): Path<String>, headers: HeaderMap) -> Response {
     let party = match find_party(&state, &room_code).await { Ok(party) => party, Err(error) => return error };
     match host_authorized(&state, &party.code, &headers).await {
         Ok(true) => {}
         Ok(false) => return failure(StatusCode::UNAUTHORIZED, "A valid room host token is required"),
         Err(error) => return error,
     }
-    match state.parties.delete_one(doc! { "code": &party.code }).await {
+    match state.rooms.parties().delete_one(doc! { "code": &party.code }).await {
         Ok(result) if result.deleted_count == 1 => {
-            let _ = state.party_auth.delete_one(doc! { "code": &party.code }).await;
-            io.to(room_socket_channel(&party.code)).emit("room-closed", &party.code).ok();
+            let _ = state.rooms.party_auth().delete_one(doc! { "code": &party.code }).await;
+            state.rooms.publish(&party.code, "room-closed", &party.code).await;
             json(serde_json::json!({ "closed": true }))
         }
         Ok(_) => failure(StatusCode::CONFLICT, "Room could not be closed"),
         Err(_) => failure(StatusCode::INTERNAL_SERVER_ERROR, "Database error occurred"),
+    }
+}
+
+async fn create_room_socket_ticket(
+    State(state): State<AppState>,
+    Path(room_code): Path<String>,
+    ConnectInfo(address): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Json(input): Json<RoomSocketTicketInput>,
+) -> Response {
+    let address = client_ip(address, &headers, &state.trusted_proxies);
+    if let Err(retry_after) = state.room_lookup_rate_limiter.check(address).await {
+        return too_many_requests(retry_after);
+    }
+    let username = clean(&input.username);
+    if username.is_empty() || username.len() > 50 {
+        return failure(StatusCode::BAD_REQUEST, "A valid room name is required");
+    }
+    let access_token = headers
+        .get("x-room-access-token")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    let session_expires_at = match room_access_session_expiry(&state, access_token).await {
+        Some(expires_at) => expires_at,
+        None => return failure(StatusCode::UNAUTHORIZED, ROOM_ACCESS_REQUIRED_MESSAGE),
+    };
+    let party = match find_party(&state, &room_code).await {
+        Ok(party) => party,
+        Err(error) => return error,
+    };
+    if !party.members.iter().any(|member| member == &username) {
+        return failure(StatusCode::FORBIDDEN, "Join the room before opening its live connection");
+    }
+    if party.host == username {
+        match host_authorized(&state, &party.code, &headers).await {
+            Ok(true) => {}
+            Ok(false) => return failure(StatusCode::UNAUTHORIZED, "A valid room host token is required"),
+            Err(error) => return error,
+        }
+    }
+    let is_host = party.host == username;
+    let ticket = state.rooms.create_socket_ticket(
+        &party.code,
+        &username,
+        session_expires_at,
+        is_host,
+    ).await;
+    json(serde_json::json!({ "ticket": ticket }))
+}
+
+async fn room_socket(
+    State(state): State<AppState>,
+    Path(room_code): Path<String>,
+    Query(auth): Query<RoomSocketAuth>,
+    ws: WebSocketUpgrade,
+) -> Response {
+    let code = normalize_code(&room_code);
+    if !valid_room_code(&code) {
+        return failure(StatusCode::UNAUTHORIZED, "A valid room session is required");
+    }
+    let Some(ticket) = state.rooms.consume_socket_ticket(&auth.ticket).await else {
+        return failure(StatusCode::UNAUTHORIZED, "The room connection ticket is invalid or expired");
+    };
+    if ticket.code != code || ticket.session_expires_at <= epoch_millis() {
+        return failure(StatusCode::UNAUTHORIZED, "The room connection ticket is invalid or expired");
+    }
+    let username = ticket.username;
+    let is_host = ticket.is_host;
+
+    let party = match find_party(&state, &code).await {
+        Ok(party) => party,
+        Err(error) if error.status() == StatusCode::NOT_FOUND => {
+            let closed = serde_json::json!({
+                "event": "room-closed",
+                "data": code,
+                "sender": null,
+            }).to_string();
+            return ws.on_upgrade(move |mut socket| async move {
+                let _ = socket.send(Message::Text(closed.into())).await;
+                let _ = socket.send(Message::Close(None)).await;
+            });
+        }
+        Err(error) => return error,
+    };
+    if !party.members.iter().any(|member| member == &username) {
+        return failure(StatusCode::FORBIDDEN, "Join the room before opening its live connection");
+    }
+
+    let service = state.rooms.clone();
+    ws.on_upgrade(move |socket| handle_room_socket(
+        socket,
+        service,
+        code,
+        username,
+        ticket.session_expires_at,
+        is_host,
+    ))
+}
+
+async fn handle_room_socket(
+    mut socket: WebSocket,
+    service: RoomService,
+    code: String,
+    username: String,
+    expires_at: i64,
+    is_host: bool,
+) {
+    let socket_id = random_token(16);
+    let mut events = service.subscribe(&code).await;
+    match service.connected(&code, &username).await {
+        Ok(true) => {}
+        Ok(false) => {
+            let closed = serde_json::json!({
+                "event": "room-closed",
+                "data": code,
+                "sender": null,
+            }).to_string();
+            let _ = socket.send(Message::Text(closed.into())).await;
+            let _ = socket.send(Message::Close(None)).await;
+            return;
+        }
+        Err(error) => {
+            tracing::error!(room_code = %code, %error, "Room presence could not be registered");
+            let failure = serde_json::json!({
+                "event": "error",
+                "data": "Room presence could not be registered; retry the connection.",
+                "sender": null,
+            }).to_string();
+            let _ = socket.send(Message::Text(failure.into())).await;
+            let _ = socket.send(Message::Close(None)).await;
+            return;
+        }
+    }
+    match service.parties().find_one(doc! { "code": &code }).await {
+        Ok(Some(party)) => service.publish(&code, "room-state", &party).await,
+        Ok(None) => {
+            service.disconnected(&code, &username).await;
+            let closed = serde_json::json!({
+                "event": "room-closed",
+                "data": code,
+                "sender": null,
+            }).to_string();
+            let _ = socket.send(Message::Text(closed.into())).await;
+            let _ = socket.send(Message::Close(None)).await;
+            return;
+        }
+        Err(error) => {
+            tracing::error!(room_code = %code, %error, "Room snapshot could not be loaded for a live connection");
+            service.disconnected(&code, &username).await;
+            let failure = serde_json::json!({
+                "event": "error",
+                "data": "Room state could not be loaded; retry the connection.",
+                "sender": null,
+            }).to_string();
+            let _ = socket.send(Message::Text(failure.into())).await;
+            let _ = socket.send(Message::Close(None)).await;
+            return;
+        }
+    }
+
+    let (mut outgoing, mut incoming) = socket.split();
+    let connected = serde_json::json!({
+        "event": "connected",
+        "data": { "socketId": socket_id },
+        "sender": null,
+    });
+    if outgoing.send(Message::Text(connected.to_string().into())).await.is_err() {
+        service.disconnected(&code, &username).await;
+        return;
+    }
+    let session_deadline = tokio::time::Instant::now()
+        + Duration::from_millis(expires_at.saturating_sub(epoch_millis()).max(0) as u64);
+    loop {
+        tokio::select! {
+            message = incoming.next() => {
+                match message {
+                    Some(Ok(Message::Text(text))) => {
+                        let Ok(message) = serde_json::from_str::<RoomSocketMessage>(&text) else {
+                            tracing::warn!(room_code = %code, username = %username, "Ignoring malformed room socket message");
+                            continue;
+                        };
+                        match message.event.as_str() {
+                            "room-command" if !is_host => {
+                                let party = match service.parties().find_one(doc! { "code": &code }).await {
+                                    Ok(Some(party)) => party,
+                                    Ok(None) => {
+                                        let _ = outgoing.send(Message::Close(None)).await;
+                                        break;
+                                    }
+                                    Err(error) => {
+                                        tracing::error!(room_code = %code, %error, "Room command authorization lookup failed");
+                                        let failure = serde_json::json!({
+                                            "event": "error",
+                                            "data": "Room command could not be authorized; try again.",
+                                            "sender": null,
+                                        });
+                                        let _ = outgoing.send(Message::Text(failure.to_string().into())).await;
+                                        continue;
+                                    }
+                                };
+                                let Ok(command) = serde_json::from_value::<RoomCommand>(message.data) else { continue };
+                                if party.members.iter().any(|member| member == &username)
+                                    && room_command_allowed(&party, &command)
+                                {
+                                    service.publish_from(
+                                        &code,
+                                        "room-command",
+                                        RoomCommandEnvelope { username: username.clone(), command },
+                                        Some(&socket_id),
+                                    ).await;
+                                }
+                            }
+                            "playback-control" if is_host => {
+                                let Ok(control) = serde_json::from_value::<PlaybackControl>(message.data) else { continue };
+                                if !control.current_track_id.is_empty()
+                                    && control.current_track_id.len() <= 256
+                                    && control.current_time.is_finite()
+                                    && (0.0..=86_400.0).contains(&control.current_time)
+                                    && control.sent_at_epoch_ms > 0
+                                {
+                                    service.publish_from(&code, "playback-control", control, Some(&socket_id)).await;
+                                }
+                            }
+                            "playback-progress" if is_host => {
+                                let Ok(progress) = serde_json::from_value::<PlaybackProgress>(message.data) else { continue };
+                                if !progress.current_track_id.is_empty()
+                                    && progress.current_track_id.len() <= 256
+                                    && progress.current_time.is_finite()
+                                    && (0.0..=86_400.0).contains(&progress.current_time)
+                                    && progress.duration.is_finite()
+                                    && (0.0..=86_400.0).contains(&progress.duration)
+                                {
+                                    service.publish_from(&code, "playback-progress", progress, Some(&socket_id)).await;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    Some(Ok(Message::Ping(payload))) => {
+                        if outgoing.send(Message::Pong(payload)).await.is_err() { break; }
+                    }
+                    Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break,
+                    _ => {}
+                }
+            }
+            event = events.recv() => {
+                match event {
+                    Ok(event) => {
+                        let is_own_event = serde_json::from_str::<serde_json::Value>(&event)
+                            .ok()
+                            .and_then(|value| value.get("sender").and_then(serde_json::Value::as_str).map(str::to_owned))
+                            .is_some_and(|sender| sender == socket_id);
+                        if !is_own_event && outgoing.send(Message::Text(event.into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+            _ = tokio::time::sleep_until(session_deadline) => {
+                let _ = outgoing.send(Message::Close(None)).await;
+                break;
+            }
+        }
+    }
+    service.disconnected(&code, &username).await;
+    if let Ok(Some(party)) = service.parties().find_one(doc! { "code": &code }).await {
+        service.publish(&code, "room-state", &party).await;
     }
 }
 
@@ -1439,7 +1714,7 @@ async fn upload_shared_audio(State(state): State<AppState>, Path(room_code): Pat
         .map(str::to_ascii_lowercase).filter(|value| valid_audio_extension(value)) else {
         return failure(StatusCode::BAD_REQUEST, "Unsupported audio file type");
     };
-    let directory = state.audio_root.join("uploads").join(&party.code);
+    let directory = state.rooms.audio_root().join("uploads").join(&party.code);
     if tokio::fs::create_dir_all(&directory).await.is_err() {
         return failure(StatusCode::INTERNAL_SERVER_ERROR, "Audio storage is unavailable");
     }
@@ -1512,7 +1787,7 @@ async fn stream_shared_audio(
     let Some((_, extension)) = parse_audio_id(&audio_id) else {
         return failure(StatusCode::BAD_REQUEST, "Invalid audio ID");
     };
-    let path = state.audio_root.join("uploads").join(party.code).join(&audio_id);
+    let path = state.rooms.audio_root().join("uploads").join(party.code).join(&audio_id);
     let metadata = match tokio::fs::metadata(&path).await {
         Ok(metadata) if metadata.is_file() => metadata,
         _ => return failure(StatusCode::NOT_FOUND, "Shared audio has expired or does not exist"),
@@ -1577,9 +1852,9 @@ async fn cleanup_expired_audio(audio_root: PathBuf) {
     }
 }
 
-async fn cleanup_idle_rooms(state: &AppState, io: &SocketIo) {
-    let cutoff = room_idle_cutoff(now());
-    let mut rooms = match state.parties.find(doc! { "updatedAt": { "$lte": cutoff } }).await {
+async fn cleanup_idle_rooms(state: &AppState) {
+    let cutoff = room_empty_cutoff(now());
+    let mut rooms = match state.rooms.parties().find(doc! { "emptySince": { "$lte": cutoff } }).await {
         Ok(rooms) => rooms,
         Err(error) => {
             tracing::error!(%error, "Idle room cleanup query failed");
@@ -1595,20 +1870,18 @@ async fn cleanup_idle_rooms(state: &AppState, io: &SocketIo) {
                 continue;
             }
         };
-        match state.parties.delete_one(doc! {
+        if state.rooms.has_live_sockets(&party.code).await {
+            continue;
+        }
+        match state.rooms.parties().delete_one(doc! {
             "code": &party.code,
-            "updatedAt": { "$lte": cutoff },
+            "emptySince": { "$lte": cutoff },
         }).await {
             Ok(result) if result.deleted_count == 1 => {
-                if let Err(error) = state.party_auth.delete_one(doc! { "code": &party.code }).await {
+                if let Err(error) = state.rooms.party_auth().delete_one(doc! { "code": &party.code }).await {
                     tracing::error!(room_code = %party.code, %error, "Idle room authorization cleanup failed");
                 }
-                if let Err(error) = io
-                    .to(room_socket_channel(&party.code))
-                    .emit("room-closed", &party.code)
-                {
-                    tracing::warn!(room_code = %party.code, %error, "Could not notify listeners that the idle room closed");
-                }
+                state.rooms.publish(&party.code, "room-closed", &party.code).await;
                 info!(room_code = %party.code, "Closed room after five minutes without activity");
             }
             Ok(_) => {}
@@ -1642,10 +1915,12 @@ async fn main() {
     let database = client.database("wavelength");
     let state = AppState {
         database: database.clone(),
-        parties: database.collection("parties"),
-        party_auth: database.collection("party_auth"),
+        rooms: RoomService::new(
+            database.collection("parties"),
+            database.collection("party_auth"),
+            PathBuf::from(env::var("MUSIC_ROOT").unwrap_or_else(|_| "/music".into())),
+        ),
         http: reqwest::Client::new(),
-        audio_root: PathBuf::from(env::var("MUSIC_ROOT").unwrap_or_else(|_| "/music".into())),
         spotify_states: Arc::new(Mutex::new(HashMap::new())),
         spotify_sessions: Arc::new(Mutex::new(HashMap::new())),
         spotify_handoffs: Arc::new(Mutex::new(HashMap::new())),
@@ -1657,133 +1932,17 @@ async fn main() {
         room_access_sessions: Arc::new(Mutex::new(HashMap::new())),
         shared_audio_access: Arc::new(Mutex::new(HashMap::new())),
     };
-    state.parties.update_many(
+    state.rooms.parties().update_many(
+        doc! {},
+        doc! { "$set": { "emptySince": now() }, "$setOnInsert": { "updatedAt": now() } },
+    ).await.expect("initialize empty-room timers");
+    state.rooms.parties().update_many(
         doc! { "updatedAt": { "$exists": false } },
         doc! { "$set": { "updatedAt": now() } },
-    ).await.expect("initialize activity timestamps for existing rooms");
-    let (socket_layer, io) = SocketIo::builder().build_layer();
-    let parties = state.parties.clone();
-    let socket_state = state.clone();
-    io.ns("/", move |socket: SocketRef, Data(auth): Data<RoomSocketAuth>| {
-        let parties = parties.clone();
-        let state = socket_state.clone();
-        async move {
-            let Some(expires_at) =
-                room_access_session_expiry(&state, &auth.access_token).await
-            else {
-                socket.disconnect().ok();
-                return;
-            };
-            let code = normalize_code(&auth.code);
-            let username = clean(&auth.username);
-            if !valid_room_code(&code) || username.is_empty() || username.len() > 50 {
-                socket.disconnect().ok();
-                return;
-            }
-            let party = match parties.find_one(doc! { "code": &code }).await {
-                Ok(Some(party)) if party.members.iter().any(|member| member == &username) => party,
-                _ => {
-                    socket.disconnect().ok();
-                    return;
-                }
-            };
-            socket.join(room_socket_channel(&party.code));
-            socket.emit("room-state", &party).ok();
-            if party.host != username {
-                let room_code = party.code.clone();
-                let username = username.clone();
-                let parties = parties.clone();
-                socket.on("room-command", move |socket: SocketRef, Data(command): Data<RoomCommand>| {
-                    let room_code = room_code.clone();
-                    let username = username.clone();
-                    let parties = parties.clone();
-                    async move {
-                        let Ok(Some(party)) = parties.find_one(doc! { "code": &room_code }).await else {
-                            return;
-                        };
-                        if !party.members.iter().any(|member| member == &username) {
-                            return;
-                        }
-                        if !room_command_allowed(&party, &command) {
-                            return;
-                        }
-                        socket.broadcast()
-                            .to(room_socket_channel(&room_code))
-                            .emit("room-command", &RoomCommandEnvelope { username, command })
-                            .ok();
-                    }
-                });
-            }
-            if party.host == username {
-                let room_code = party.code.clone();
-                let control_room_code = room_code.clone();
-                socket.on("playback-control", move |socket: SocketRef, Data(control): Data<PlaybackControl>| {
-                    let room_code = control_room_code.clone();
-                    async move {
-                        if control.current_track_id.is_empty()
-                            || control.current_track_id.len() > 256
-                            || !control.current_time.is_finite()
-                            || control.current_time < 0.0
-                            || control.current_time > 86_400.0
-                            || control.sent_at_epoch_ms <= 0
-                        {
-                            return;
-                        }
-                        socket.broadcast()
-                            .to(room_socket_channel(&room_code))
-                            .emit("playback-control", &control)
-                            .ok();
-                    }
-                });
-                socket.on("playback-progress", move |socket: SocketRef, Data(progress): Data<PlaybackProgress>| {
-                    let room_code = room_code.clone();
-                    async move {
-                        if progress.current_track_id.is_empty()
-                            || progress.current_track_id.len() > 256
-                            || !progress.current_time.is_finite()
-                            || progress.current_time < 0.0
-                            || progress.current_time > 86_400.0
-                            || !progress.duration.is_finite()
-                            || progress.duration < 0.0
-                            || progress.duration > 86_400.0
-                        {
-                            return;
-                        }
-                        socket.broadcast()
-                            .to(room_socket_channel(&room_code))
-                            .emit("playback-progress", &progress)
-                            .ok();
-                    }
-                });
-            }
-            let expiry_socket = socket.clone();
-            let (disconnect_sender, mut disconnect_receiver) =
-                tokio::sync::oneshot::channel();
-            let disconnect_sender = Arc::new(std::sync::Mutex::new(Some(disconnect_sender)));
-            socket.on_disconnect(
-                move |_: SocketRef, _: socketioxide::socket::DisconnectReason| {
-                    if let Ok(mut sender) = disconnect_sender.lock() {
-                        if let Some(sender) = sender.take() {
-                            let _ = sender.send(());
-                        }
-                    }
-                    async {}
-                },
-            );
-            tokio::spawn(async move {
-                let remaining = expires_at.saturating_sub(epoch_millis()).max(0) as u64;
-                tokio::select! {
-                    _ = tokio::time::sleep(Duration::from_millis(remaining)) => {
-                        expiry_socket.disconnect().ok();
-                    }
-                    _ = &mut disconnect_receiver => {}
-                }
-            });
-        }
-    });
+    ).await.expect("initialize room timestamps");
     let origins = allowed_origins(env::var("FRONTEND_URL").ok().as_deref());
-    cleanup_expired_audio(state.audio_root.clone()).await;
-    let cleanup_root = state.audio_root.clone();
+    cleanup_expired_audio(state.rooms.audio_root().to_path_buf()).await;
+    let cleanup_root = state.rooms.audio_root().to_path_buf();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(60 * 60));
         loop {
@@ -1792,24 +1951,27 @@ async fn main() {
         }
     });
     let cleanup_state = state.clone();
-    let cleanup_io = io.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(ROOM_CLEANUP_INTERVAL);
         loop {
             interval.tick().await;
-            cleanup_idle_rooms(&cleanup_state, &cleanup_io).await;
+            cleanup_idle_rooms(&cleanup_state).await;
         }
     });
-    let api = Router::new()
-        .route("/parties", post(create_room))
-        .route("/parties/join", post(join_room))
-        .route("/parties/:code/leave", post(leave_room))
-        .route("/parties/:code", get(read_room).put(update_room).delete(close_room)
+    let v2_api = Router::new()
+        .route("/session", post(create_room_access_session))
+        .route("/rooms", post(create_room))
+        .route("/rooms/join", post(join_room))
+        .route("/rooms/:code/leave", post(leave_room))
+        .route("/rooms/:code/socket-ticket", post(create_room_socket_ticket))
+        .route("/rooms/:code/socket", get(room_socket))
+        .route("/rooms/:code", get(read_room).put(update_room).delete(close_room)
             .layer(DefaultBodyLimit::max(MAX_ROOM_UPDATE_BYTES)))
-        .route("/parties/:code/audio", post(upload_shared_audio))
-        .route("/parties/:code/audio/:audio_id", get(stream_shared_audio))
-        .route("/parties/:code/audio/:audio_id/access", get(create_shared_audio_access))
-        .route("/auth/session", post(create_room_access_session))
+        .route("/rooms/:code/audio", post(upload_shared_audio))
+        .route("/rooms/:code/audio/:audio_id", get(stream_shared_audio))
+        .route("/rooms/:code/audio/:audio_id/access", get(create_shared_audio_access))
+        .route_layer(middleware::from_fn_with_state(state.clone(), require_room_access));
+    let spotify_api = Router::new()
         .route("/spotify/login", get(spotify_login))
         .route("/spotify/callback", get(spotify_callback))
         .route("/spotify/desktop-exchange", post(spotify_desktop_exchange))
@@ -1823,9 +1985,8 @@ async fn main() {
         .route_layer(middleware::from_fn_with_state(state.clone(), require_room_access));
     let app = Router::new()
         .route("/health", get(health))
-        .nest("/api", api)
-        .layer(Extension(io))
-        .layer(socket_layer)
+        .nest("/api/v2", v2_api)
+        .nest("/api", spotify_api)
         .layer(CorsLayer::new()
             .allow_origin(origins)
             .allow_headers([
@@ -1850,11 +2011,13 @@ async fn main() {
 mod tests {
     use super::{
         allowed_origins, client_ip, frontend_origin, hash_room_server_passcode,
-        generate_room_code, is_shared_audio_stream_path, normalize_code, parse_audio_id, parse_byte_range,
-        public_api_request, room_command_allowed, room_idle_cutoff, room_is_idle,
+        generate_room_code, is_shared_audio_stream_path, is_shared_audio_upload_path,
+        normalize_code, parse_audio_id, parse_byte_range,
+        public_api_request, room_command_allowed, room_empty_cutoff, room_empty_timeout_expired,
         room_update_document, room_update_filter,
         shared_audio_grant_matches, spotify_track_uris, token_hash, token_matches,
         too_many_requests, valid_room_code, verify_room_server_passcode, IpRateLimiter, Party,
+        RoomSocketMessage,
         Permissions, RoomCommand, SharedAudioGrant, UpdateInput, LEGACY_ROOM_CODE_LENGTH,
         ROOM_IDLE_TIMEOUT, SHARED_AUDIO_TTL,
     };
@@ -1924,16 +2087,26 @@ mod tests {
     }
 
     #[test]
-    fn rooms_expire_at_five_minutes_without_activity() {
+    fn empty_rooms_expire_five_minutes_after_the_last_socket_disconnect() {
         let current_time = 1_000_000;
         let idle_timeout = ROOM_IDLE_TIMEOUT.as_millis() as i64;
 
         assert_eq!(idle_timeout, 5 * 60 * 1000);
-        assert_eq!(room_idle_cutoff(current_time), current_time - idle_timeout);
-        assert!(!room_is_idle(current_time - idle_timeout + 1, current_time));
-        assert!(room_is_idle(current_time - idle_timeout, current_time));
-        assert!(room_is_idle(current_time - idle_timeout - 1, current_time));
-        assert!(!room_is_idle(current_time + 1, current_time));
+        assert_eq!(room_empty_cutoff(current_time), current_time - idle_timeout);
+        assert!(!room_empty_timeout_expired(
+            Some(current_time - idle_timeout + 1),
+            current_time
+        ));
+        assert!(room_empty_timeout_expired(
+            Some(current_time - idle_timeout),
+            current_time
+        ));
+        assert!(room_empty_timeout_expired(
+            Some(current_time - idle_timeout - 1),
+            current_time
+        ));
+        assert!(!room_empty_timeout_expired(None, current_time));
+        assert!(!room_empty_timeout_expired(Some(current_time + 1), current_time));
     }
 
     #[test]
@@ -2058,27 +2231,54 @@ mod tests {
     }
 
     #[test]
-    fn room_api_auth_exempts_only_passcode_and_oauth_entry_points() {
-        assert!(public_api_request(&Method::POST, "/api/auth/session"));
+    fn room_api_auth_exempts_only_v2_session_socket_and_oauth_entry_points() {
+        assert!(public_api_request(&Method::POST, "/api/v2/session"));
+        assert!(public_api_request(&Method::GET, "/api/v2/rooms/AB12/socket"));
         assert!(public_api_request(&Method::GET, "/api/spotify/login"));
         assert!(public_api_request(&Method::GET, "/api/spotify/callback"));
-        assert!(!public_api_request(&Method::GET, "/api/auth/session"));
-        assert!(!public_api_request(&Method::GET, "/api/parties"));
+        assert!(!public_api_request(&Method::GET, "/api/v2/session"));
+        assert!(!public_api_request(&Method::POST, "/api/auth/session"));
+        assert!(!public_api_request(&Method::GET, "/api/v2/rooms"));
+        assert!(!public_api_request(&Method::POST, "/api/v2/rooms/AB12/socket-ticket"));
         assert!(!public_api_request(&Method::GET, "/api/spotify/me"));
 
         let audio_id = format!("{}.flac", "a".repeat(64));
         assert!(is_shared_audio_stream_path(
             &Method::GET,
-            &format!("/api/parties/AB12/audio/{audio_id}")
+            &format!("/api/v2/rooms/AB12/audio/{audio_id}")
         ));
         assert!(!is_shared_audio_stream_path(
             &Method::GET,
-            &format!("/api/parties/AB12/audio/{audio_id}/access")
+            &format!("/api/v2/rooms/AB12/audio/{audio_id}/access")
         ));
         assert!(!is_shared_audio_stream_path(
             &Method::POST,
-            &format!("/api/parties/AB12/audio/{audio_id}")
+            &format!("/api/v2/rooms/AB12/audio/{audio_id}")
         ));
+        assert!(is_shared_audio_upload_path(
+            &Method::POST,
+            "/api/v2/rooms/AB12/audio"
+        ));
+        assert!(!is_shared_audio_upload_path(
+            &Method::POST,
+            "/api/v2/rooms/AB12/audio/not-an-upload"
+        ));
+    }
+
+    #[test]
+    fn direct_websocket_protocol_uses_json_event_envelopes() {
+        let message: RoomSocketMessage = serde_json::from_str(
+            r#"{"event":"room-command","data":{"action":"clear-queue"}}"#,
+        ).unwrap();
+        assert_eq!(message.event, "room-command");
+        assert_eq!(message.data["action"], "clear-queue");
+        let outgoing = serde_json::json!({
+            "event": "room-state",
+            "data": { "code": "AB12" },
+            "sender": null,
+        });
+        assert_eq!(outgoing["event"], "room-state");
+        assert_eq!(outgoing["data"]["code"], "AB12");
     }
 
     #[test]

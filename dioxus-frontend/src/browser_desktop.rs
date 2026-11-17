@@ -400,6 +400,7 @@ pub fn connect_room_socket(
     code: &str,
     username: &str,
     access_token: &str,
+    host_token: &str,
     role: &str,
     permissions: &RoomPermissions,
 ) -> Result<(), String> {
@@ -410,6 +411,7 @@ pub fn connect_room_socket(
             Value::String(code.to_string()),
             Value::String(username.to_string()),
             Value::String(access_token.to_string()),
+            Value::String(host_token.to_string()),
             Value::String(role.to_string()),
             js_value(permissions)?,
         ],

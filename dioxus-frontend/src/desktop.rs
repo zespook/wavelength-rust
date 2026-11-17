@@ -1493,7 +1493,7 @@ pub async fn upload_room_track(
         .await
         .map_err(|error| format!("Could not read the local audio file: {error}"))?;
     let url = format!(
-        "{}/api/parties/{}/audio",
+        "{}/api/v2/rooms/{}/audio",
         url.trim_end_matches('/'),
         url::form_urlencoded::byte_serialize(code.as_bytes())
             .collect::<String>()

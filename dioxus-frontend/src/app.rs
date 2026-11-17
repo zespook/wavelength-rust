@@ -609,16 +609,8 @@ pub(crate) fn App() -> Element {
             let mut shared_playlists = room_shared_playlists;
             let queue = queue;
             spawn(async move {
-                match browser::room_request::<RoomParty>(
-                    &url,
-                    &format!("/parties/{}", code),
-                    "GET",
-                    &serde_json::json!({}),
-                    &access,
-                    &host,
-                )
-                .await
-                {
+                let client = browser::RoomClient::new(&url, &access);
+                match client.read(&code, &host).await {
                     Ok(party) => {
                         if !party.members.contains(&name) {
                             let queue_restore_error = if saved_role == "guest" {
@@ -660,6 +652,7 @@ pub(crate) fn App() -> Element {
                                 &code,
                                 &name,
                                 &access,
+                                &host,
                                 restored_role,
                                 &party.permissions,
                             ) {
