@@ -13,6 +13,7 @@ pub(crate) fn EqualizerPage(notice: Signal<String>) -> Element {
     let mut frequencies = use_signal(|| bands.to_vec());
     let mut qs = use_signal(|| vec![1.1; 10]);
     let mut types = use_signal(|| vec!["peaking".to_string(); 10]);
+    let mut equalizer_enabled = use_signal(|| false);
     let mut selected_band = use_signal(|| 0usize);
     let mut placement_band = use_signal(|| Option::<usize>::None);
     let mut preset_id = use_signal(|| "flat".to_string());
@@ -35,6 +36,17 @@ pub(crate) fn EqualizerPage(notice: Signal<String>) -> Element {
         let loaded_types = browser::load::<Vec<String>>("wavelength-equalizer-types");
         let loaded_preset = browser::load::<String>("wavelength-equalizer-preset");
         let loaded_custom = browser::load::<Vec<EqualizerPreset>>("wavelength-equalizer-presets");
+        let loaded_enabled = match browser::load::<bool>("wavelength-equalizer-enabled") {
+            Ok(Some(enabled)) => {
+                equalizer_enabled.set(enabled);
+                enabled
+            }
+            Ok(None) => false,
+            Err(error) => {
+                errors.push(error);
+                false
+            }
+        };
 
         match loaded_gains {
             Ok(values) => gains.set(values),
@@ -84,6 +96,7 @@ pub(crate) fn EqualizerPage(notice: Signal<String>) -> Element {
             frequencies: frequencies(),
             qs: qs(),
             types: types(),
+            enabled: loaded_enabled,
         };
         if let Err(error) = browser::set_equalizer(&state) {
             unavailable.set(true);
@@ -169,7 +182,7 @@ pub(crate) fn EqualizerPage(notice: Signal<String>) -> Element {
                                 types.set(next_types);
                                 preset_id.set(id);
                                 persist_equalizer(&gains(), &frequencies(), &qs(), &types(), &preset_id(), notice);
-                                unavailable.set(set_equalizer_state(&gains(), &frequencies(), &qs(), &types(), notice).is_err());
+                                unavailable.set(set_equalizer_state(&gains(), &frequencies(), &qs(), &types(), equalizer_enabled(), notice).is_err());
                             }
                                     }
                                 }
@@ -218,6 +231,33 @@ pub(crate) fn EqualizerPage(notice: Signal<String>) -> Element {
                             }
                         }
                         div { class: "equalizer-toolbar-actions",
+                            button {
+                                class: "outline-button compact-action equalizer-toggle",
+                                r#type: "button",
+                                aria_label: "Equalizer",
+                                aria_pressed: equalizer_enabled(),
+                                disabled: unavailable(),
+                                onclick: move |_| {
+                                    let enabled = !equalizer_enabled();
+                                    equalizer_enabled.set(enabled);
+                                    unavailable.set(
+                                        set_equalizer_state(
+                                            &gains(),
+                                            &frequencies(),
+                                            &qs(),
+                                            &types(),
+                                            enabled,
+                                            notice,
+                                        )
+                                        .is_err(),
+                                    );
+                                    if let Err(error) = browser::save("wavelength-equalizer-enabled", &enabled) {
+                                        notice.set(error);
+                                    }
+                                },
+                                span { "Equalizer" }
+                                span { if equalizer_enabled() { "On" } else { "Off" } }
+                            }
                             button { class: "outline-button compact-action", disabled: unavailable(), onclick: move |_| {
                             placement_band.set(None);
                             if let Err(error) = browser::clear_equalizer_preview() {
@@ -229,7 +269,7 @@ pub(crate) fn EqualizerPage(notice: Signal<String>) -> Element {
                             types.set(vec!["peaking".to_string(); 10]);
                             preset_id.set("flat".to_string());
                             persist_equalizer(&gains(), &frequencies(), &qs(), &types(), &preset_id(), notice);
-                            unavailable.set(set_equalizer_state(&gains(), &frequencies(), &qs(), &types(), notice).is_err());
+                            unavailable.set(set_equalizer_state(&gains(), &frequencies(), &qs(), &types(), equalizer_enabled(), notice).is_err());
                                             }, "Reset" }
                                         }
                                     }
@@ -249,7 +289,7 @@ pub(crate) fn EqualizerPage(notice: Signal<String>) -> Element {
                                 if let Some(index) = placement_band() {
                                     set_equalizer_graph_point(
                                         index, point.x, point.y, width, height,
-                                        gains, frequencies, qs, types, preset_id, unavailable, notice,
+                                        gains, frequencies, qs, types, preset_id, unavailable, equalizer_enabled(), notice,
                                     );
                                     persist_equalizer(&gains(), &frequencies(), &qs(), &types(), &preset_id(), notice);
                                     placement_band.set(None);
@@ -334,7 +374,7 @@ pub(crate) fn EqualizerPage(notice: Signal<String>) -> Element {
                             types.set(next_types);
                             preset_id.set("custom".to_string());
                             persist_equalizer(&gains(), &frequencies(), &qs(), &types(), &preset_id(), notice);
-                            unavailable.set(set_equalizer_state(&gains(), &frequencies(), &qs(), &types(), notice).is_err());
+                            unavailable.set(set_equalizer_state(&gains(), &frequencies(), &qs(), &types(), equalizer_enabled(), notice).is_err());
                         }, "Reset band" }
                     }
                     label { class: "equalizer-parameter",
@@ -349,7 +389,7 @@ pub(crate) fn EqualizerPage(notice: Signal<String>) -> Element {
                                 frequencies.set(next);
                                 preset_id.set("custom".to_string());
                                 persist_equalizer(&gains(), &frequencies(), &qs(), &types(), &preset_id(), notice);
-                                unavailable.set(set_equalizer_state(&gains(), &frequencies(), &qs(), &types(), notice).is_err());
+                                unavailable.set(set_equalizer_state(&gains(), &frequencies(), &qs(), &types(), equalizer_enabled(), notice).is_err());
                             }
                         }
                         input { r#type: "range", min: "0", max: "1000", step: "1",
@@ -362,7 +402,7 @@ pub(crate) fn EqualizerPage(notice: Signal<String>) -> Element {
                                 frequencies.set(next);
                                 preset_id.set("custom".to_string());
                                 persist_equalizer(&gains(), &frequencies(), &qs(), &types(), &preset_id(), notice);
-                                unavailable.set(set_equalizer_state(&gains(), &frequencies(), &qs(), &types(), notice).is_err());
+                                unavailable.set(set_equalizer_state(&gains(), &frequencies(), &qs(), &types(), equalizer_enabled(), notice).is_err());
                             }
                         }
                     }
@@ -378,7 +418,7 @@ pub(crate) fn EqualizerPage(notice: Signal<String>) -> Element {
                                 gains.set(next);
                                 preset_id.set("custom".to_string());
                                 persist_equalizer(&gains(), &frequencies(), &qs(), &types(), &preset_id(), notice);
-                                unavailable.set(set_equalizer_state(&gains(), &frequencies(), &qs(), &types(), notice).is_err());
+                                unavailable.set(set_equalizer_state(&gains(), &frequencies(), &qs(), &types(), equalizer_enabled(), notice).is_err());
                             }
                         }
                         input { r#type: "range", min: "-18", max: "18", step: "0.1",
@@ -389,7 +429,7 @@ pub(crate) fn EqualizerPage(notice: Signal<String>) -> Element {
                                 gains.set(next);
                                 preset_id.set("custom".to_string());
                                 persist_equalizer(&gains(), &frequencies(), &qs(), &types(), &preset_id(), notice);
-                                unavailable.set(set_equalizer_state(&gains(), &frequencies(), &qs(), &types(), notice).is_err());
+                                unavailable.set(set_equalizer_state(&gains(), &frequencies(), &qs(), &types(), equalizer_enabled(), notice).is_err());
                             }
                         }
                     }
@@ -420,7 +460,7 @@ pub(crate) fn EqualizerPage(notice: Signal<String>) -> Element {
                                 qs.set(next);
                                 preset_id.set("custom".to_string());
                                 persist_equalizer(&gains(), &frequencies(), &qs(), &types(), &preset_id(), notice);
-                                unavailable.set(set_equalizer_state(&gains(), &frequencies(), &qs(), &types(), notice).is_err());
+                                unavailable.set(set_equalizer_state(&gains(), &frequencies(), &qs(), &types(), equalizer_enabled(), notice).is_err());
                             }
                         }
                     }
@@ -443,7 +483,7 @@ pub(crate) fn EqualizerPage(notice: Signal<String>) -> Element {
                                 types.set(next);
                                 preset_id.set("custom".to_string());
                                 persist_equalizer(&gains(), &frequencies(), &qs(), &types(), &preset_id(), notice);
-                                unavailable.set(set_equalizer_state(&gains(), &frequencies(), &qs(), &types(), notice).is_err());
+                                unavailable.set(set_equalizer_state(&gains(), &frequencies(), &qs(), &types(), equalizer_enabled(), notice).is_err());
                             }
                         }
                     }

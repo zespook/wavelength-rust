@@ -23,6 +23,7 @@ webview_install_mode = { DownloadBootstrapper = { silent = true } }
 
 [bundle.windows.nsis]
 installer_icon = "icons/icon.ico"
+template = "../scripts/wavelength-windows-nsis.nsi"
 installer_hooks = "../scripts/install-services.nsi"
 
 [bundle.deb]

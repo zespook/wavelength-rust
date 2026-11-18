@@ -15,6 +15,17 @@ pub(super) fn HomePage(data: std::rc::Rc<PageData>) -> Element {
     let home_albums = data.home_albums.clone();
     let artist_stats = data.artist_stats.clone();
     let song_stats = data.song_stats.clone();
+    let playlist_count = library_playlist_count(
+        &(app_state.playlists)(),
+        &(app_state.room_shared_playlists)(),
+        &(app_state.spotify_playlists)(),
+        (app_state.spotify_profile)().is_some(),
+    );
+    let playlist_count_label = if playlist_count == 1 {
+        "playlist"
+    } else {
+        "playlists"
+    };
     match Page::Home {
         Page::Home => rsx! {
             section { class: "home-hero",
@@ -25,7 +36,7 @@ pub(super) fn HomePage(data: std::rc::Rc<PageData>) -> Element {
                         p { "Search across music services or bring your own collection together" }
                     }
                     div { class: "home-actions",
-                        button { class: "solid-button", onclick: move |_| app_state.page.set(Page::Search),
+                        button { class: "solid-button", onclick: move |_| focus_search_bar(app_state.notice),
                             Icon { name: "search" }
                             "Find music"
                         }
@@ -42,13 +53,13 @@ pub(super) fn HomePage(data: std::rc::Rc<PageData>) -> Element {
                             });
                         },
                             Icon { name: "folder" }
-                            "Add a folder"
+                            "Set downloads folder"
                         }
                     }
                     p { class: "home-library-count",
                         "{(app_state.local_tracks)().len()} local tracks"
                         span { "·" }
-                        "{(app_state.playlists)().len()} playlists"
+                        "{playlist_count} {playlist_count_label}"
                     }
                 }
                 article { class: "home-library-preview",
@@ -142,6 +153,7 @@ pub(super) fn HomePage(data: std::rc::Rc<PageData>) -> Element {
                                 onclick: {
                                     let album_name = name.clone();
                                     move |_| {
+                                        app_state.spotify_album_selected.set(None);
                                         app_state.album_detail_name.set(Some(album_name.clone()));
                                         app_state.page.set(Page::AlbumDetail);
                                     }

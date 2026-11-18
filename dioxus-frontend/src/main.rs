@@ -28,6 +28,7 @@ mod audio_id_tests {
     }
 }
 
+use dioxus::core::spawn_forever;
 use dioxus::prelude::*;
 use serde::{Deserialize, Serialize};
 #[cfg(target_arch = "wasm32")]
@@ -98,10 +99,10 @@ enum Page {
     Library,
     SpotifyLibrary,
     SpotifyPlaylists,
+    SpotifyPlaylistDetail,
     Playlists,
     PlaylistDetail,
     AlbumDetail,
-    Queue,
     History,
     Settings,
     Activity,
@@ -124,10 +125,10 @@ impl Page {
             Self::Library => "page-library",
             Self::SpotifyLibrary => "page-library",
             Self::SpotifyPlaylists => "page-playlists",
+            Self::SpotifyPlaylistDetail => "page-playlists",
             Self::Playlists => "page-playlists",
             Self::PlaylistDetail => "page-playlists",
             Self::AlbumDetail => "page-library",
-            Self::Queue => "page-queue",
             Self::History => "page-history",
             Self::Settings => "page-settings",
             Self::Activity => "page-activity",
@@ -198,6 +199,8 @@ struct Track {
     #[serde(default, rename = "audioId")]
     #[serde(deserialize_with = "deserialize_non_empty_string")]
     audio_id: Option<String>,
+    #[serde(default, rename = "modifiedAt")]
+    modified_at: Option<u64>,
 }
 
 fn deserialize_non_empty_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
@@ -253,6 +256,149 @@ impl Track {
             .map(|n| format!("{}:{:02}", n as u64 / 60, n as u64 % 60))
             .unwrap_or_else(|| "—".to_string())
     }
+}
+
+fn latest_track_modified_at(tracks: &[Track]) -> Option<u64> {
+    tracks
+        .iter()
+        .filter(|track| track.is_local())
+        .filter_map(|track| track.modified_at)
+        .max()
+}
+
+fn sort_track_collections<T, F>(collections: &mut [T], tracks_for: F)
+where
+    F: for<'a> Fn(&'a T) -> &'a [Track],
+{
+    collections
+        .sort_by_cached_key(|item| std::cmp::Reverse(latest_track_modified_at(tracks_for(item))));
+}
+
+#[cfg(test)]
+mod track_collection_sort_tests {
+    use super::{Track, sort_track_collections};
+
+    #[test]
+    fn sorts_collections_by_newest_local_track_modification() {
+        let track = |id: &str, source: &str, modified_at| Track {
+            id: id.to_string(),
+            source: Some(source.to_string()),
+            modified_at,
+            ..Track::default()
+        };
+        let mut collections = vec![
+            ("Older".to_string(), vec![track("old", "local", Some(100))]),
+            (
+                "Undated".to_string(),
+                vec![track("remote", "spotify", Some(300))],
+            ),
+            ("Newer".to_string(), vec![track("new", "local", Some(200))]),
+        ];
+
+        sort_track_collections(&mut collections, |(_, tracks)| tracks);
+
+        assert_eq!(
+            collections
+                .iter()
+                .map(|(name, _)| name.as_str())
+                .collect::<Vec<_>>(),
+            ["Newer", "Older", "Undated"]
+        );
+    }
+}
+
+fn search_local_tracks(tracks: &[Track], query: &str) -> Vec<Track> {
+    let query = query.trim().to_lowercase();
+    if query.is_empty() {
+        return Vec::new();
+    }
+
+    tracks
+        .iter()
+        .filter(|track| {
+            track.is_local()
+                && format!(
+                    "{} {} {}",
+                    track.title,
+                    track.artist,
+                    track.album.as_deref().unwrap_or_default()
+                )
+                .to_lowercase()
+                .contains(&query)
+        })
+        .cloned()
+        .collect()
+}
+
+fn normalized_search_match(value: &str) -> String {
+    value
+        .chars()
+        .filter(|character| character.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+fn preferred_local_track(track: Track, local_tracks: &[Track]) -> Track {
+    if track.is_local() {
+        return track;
+    }
+
+    let online_title = normalized_search_match(&track.title);
+    let online_artist = normalized_search_match(
+        track
+            .artist
+            .split(',')
+            .next()
+            .unwrap_or_default()
+            .trim()
+            .trim_end_matches("- Topic")
+            .trim_end_matches("VEVO")
+            .trim(),
+    );
+    if online_title.is_empty() || online_artist.is_empty() || online_artist == "unknownartist" {
+        return track;
+    }
+
+    local_tracks
+        .iter()
+        .filter(|candidate| candidate.is_local())
+        .filter_map(|candidate| {
+            let local_title = normalized_search_match(&candidate.title);
+            let local_artist = normalized_search_match(
+                candidate
+                    .artist
+                    .split(',')
+                    .next()
+                    .unwrap_or_default()
+                    .trim(),
+            );
+            if local_title != online_title || local_artist != online_artist {
+                return None;
+            }
+
+            let duration_difference = match (
+                track
+                    .duration
+                    .filter(|duration| duration.is_finite() && *duration > 0.0),
+                candidate
+                    .duration
+                    .filter(|duration| duration.is_finite() && *duration > 0.0),
+            ) {
+                (Some(online), Some(local)) => {
+                    let difference = (online - local).abs();
+                    if difference > 5.0_f64.max(online * 0.03) {
+                        return None;
+                    }
+                    difference
+                }
+                _ => 0.0,
+            };
+
+            Some((candidate, duration_difference))
+        })
+        .min_by(|left, right| left.1.total_cmp(&right.1))
+        .map(|(candidate, _)| candidate.clone())
+        .unwrap_or(track)
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -483,6 +629,8 @@ struct Playlist {
     id: String,
     name: String,
     #[serde(default)]
+    thumbnail: Option<String>,
+    #[serde(default)]
     tracks: Vec<Track>,
 }
 
@@ -492,12 +640,248 @@ struct DownloadStatus {
     status: String,
     progress: Option<f64>,
     error: Option<String>,
+    downloaded: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum DownloadFilter {
+    #[default]
+    All,
+    Downloaded,
+    NotDownloaded,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Deserialize)]
 struct DownloadStatusResponse {
     #[serde(default)]
     tracks: std::collections::HashMap<String, DownloadStatus>,
+}
+
+fn matches_download_filter(
+    track: &Track,
+    filter: DownloadFilter,
+    statuses: &std::collections::HashMap<String, DownloadStatus>,
+) -> bool {
+    let downloaded = track.is_local()
+        || statuses
+            .get(&track.audio_service_id())
+            .is_some_and(|status| status.downloaded);
+    match filter {
+        DownloadFilter::All => true,
+        DownloadFilter::Downloaded => downloaded,
+        DownloadFilter::NotDownloaded => !downloaded && !track.is_local(),
+    }
+}
+
+#[cfg(test)]
+mod download_filter_tests {
+    use super::{
+        DownloadFilter, DownloadStatus, Playlist, RoomSharedPlaylist, SpotifyPlaylist, Track,
+        library_playlist_count, matches_download_filter,
+    };
+
+    #[test]
+    fn downloaded_filter_treats_local_tracks_as_available() {
+        let track = Track {
+            id: "local-1".to_string(),
+            source: Some("local".to_string()),
+            ..Track::default()
+        };
+        let statuses = std::collections::HashMap::new();
+
+        assert!(matches_download_filter(
+            &track,
+            DownloadFilter::Downloaded,
+            &statuses
+        ));
+        assert!(!matches_download_filter(
+            &track,
+            DownloadFilter::NotDownloaded,
+            &statuses
+        ));
+    }
+
+    #[test]
+    fn downloaded_filter_requires_ready_status_for_remote_tracks() {
+        let ready = Track {
+            id: "remote-ready".to_string(),
+            ..Track::default()
+        };
+        let queued = Track {
+            id: "remote-queued".to_string(),
+            ..Track::default()
+        };
+        let statuses = std::collections::HashMap::from([
+            (
+                ready.audio_service_id(),
+                DownloadStatus {
+                    status: "ready".to_string(),
+                    downloaded: true,
+                    ..DownloadStatus::default()
+                },
+            ),
+            (
+                queued.audio_service_id(),
+                DownloadStatus {
+                    status: "queued".to_string(),
+                    ..DownloadStatus::default()
+                },
+            ),
+        ]);
+
+        assert!(matches_download_filter(
+            &ready,
+            DownloadFilter::Downloaded,
+            &statuses
+        ));
+        assert!(!matches_download_filter(
+            &queued,
+            DownloadFilter::Downloaded,
+            &statuses
+        ));
+        assert!(matches_download_filter(
+            &queued,
+            DownloadFilter::NotDownloaded,
+            &statuses
+        ));
+    }
+
+    #[test]
+    fn downloaded_filter_excludes_remote_tracks_only_cached_for_playback() {
+        let cached = Track {
+            id: "remote-cached".to_string(),
+            ..Track::default()
+        };
+        let statuses = std::collections::HashMap::from([(
+            cached.audio_service_id(),
+            DownloadStatus {
+                status: "ready".to_string(),
+                downloaded: false,
+                ..DownloadStatus::default()
+            },
+        )]);
+
+        assert!(!matches_download_filter(
+            &cached,
+            DownloadFilter::Downloaded,
+            &statuses
+        ));
+        assert!(matches_download_filter(
+            &cached,
+            DownloadFilter::NotDownloaded,
+            &statuses
+        ));
+    }
+
+    #[test]
+    fn library_playlist_count_excludes_favorites_and_unconnected_spotify() {
+        let local = vec![
+            Playlist {
+                id: "local-1".to_string(),
+                name: "Local playlist".to_string(),
+                ..Playlist::default()
+            },
+            Playlist {
+                id: "favorites".to_string(),
+                name: "Favorite Songs".to_string(),
+                ..Playlist::default()
+            },
+        ];
+        let shared = vec![RoomSharedPlaylist {
+            id: "shared-1".to_string(),
+            name: "Shared playlist".to_string(),
+            ..RoomSharedPlaylist::default()
+        }];
+        let spotify = vec![
+            SpotifyPlaylist {
+                id: "spotify-1".to_string(),
+                name: "Spotify playlist".to_string(),
+                ..SpotifyPlaylist::default()
+            },
+            SpotifyPlaylist {
+                id: "spotify-favorites".to_string(),
+                name: "Favorite Songs".to_string(),
+                ..SpotifyPlaylist::default()
+            },
+        ];
+
+        assert_eq!(library_playlist_count(&local, &shared, &spotify, false), 2);
+        assert_eq!(library_playlist_count(&local, &shared, &spotify, true), 3);
+    }
+
+    #[test]
+    fn local_playlist_artwork_is_optional_and_persisted() {
+        let mut playlist: Playlist =
+            serde_json::from_str(r#"{"id":"local-1","name":"Local mix","tracks":[]}"#).unwrap();
+        assert_eq!(playlist.thumbnail, None);
+
+        playlist.thumbnail = Some("https://images.example/cover.jpg".to_string());
+        let saved = serde_json::to_value(playlist).unwrap();
+        assert_eq!(
+            saved.get("thumbnail").and_then(serde_json::Value::as_str),
+            Some("https://images.example/cover.jpg")
+        );
+    }
+}
+
+fn refresh_library_download_status(
+    mut tracks: Vec<Track>,
+    include_spotify_library: bool,
+    mut spotify_tracks: Signal<Vec<Track>>,
+    mut spotify_busy: Signal<bool>,
+    mut download_status: Signal<std::collections::HashMap<String, DownloadStatus>>,
+    mut download_status_busy: Signal<bool>,
+    mut download_status_error: Signal<String>,
+) {
+    download_status_busy.set(true);
+    download_status_error.set(String::new());
+    spawn(async move {
+        let mut errors = Vec::new();
+        if include_spotify_library && spotify_tracks().is_empty() {
+            spotify_busy.set(true);
+            match browser::spotify_library().await {
+                Ok(items) => {
+                    tracks.extend(items.clone());
+                    spotify_tracks.set(items);
+                }
+                Err(error) => errors.push(format!("Could not load Spotify saved tracks: {error}")),
+            }
+            spotify_busy.set(false);
+        } else if include_spotify_library {
+            tracks.extend(spotify_tracks());
+        }
+
+        let mut unique_tracks = Vec::new();
+        let mut seen_tracks = std::collections::HashSet::new();
+        for track in tracks {
+            if !track.key().is_empty() && seen_tracks.insert(track.key().to_string()) {
+                unique_tracks.push(track);
+            }
+        }
+
+        let mut track_ids = unique_tracks
+            .iter()
+            .filter(|track| !track.is_local())
+            .map(Track::audio_service_id)
+            .filter(|id| !id.is_empty())
+            .collect::<Vec<_>>();
+        track_ids.sort();
+        track_ids.dedup();
+
+        let mut statuses = std::collections::HashMap::new();
+        for chunk in track_ids.chunks(50) {
+            match browser::download_status(chunk).await {
+                Ok(items) => statuses.extend(items),
+                Err(error) => {
+                    errors.push(format!("Could not load download status: {error}"));
+                    break;
+                }
+            }
+        }
+        download_status.set(statuses);
+        download_status_error.set(errors.join("\n"));
+        download_status_busy.set(false);
+    });
 }
 
 fn add_track_to_playlist(
@@ -599,15 +983,27 @@ struct SpotifyPlaylist {
     name: String,
     #[serde(default)]
     tracks_total: usize,
+    #[serde(default)]
+    thumbnail: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Deserialize, Serialize)]
+struct SpotifyAlbum {
+    id: String,
+    name: String,
+    #[serde(default)]
+    artist: String,
+    #[serde(default)]
+    thumbnail: Option<String>,
+    #[serde(default)]
+    tracks_total: usize,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 enum PlaylistMenuTarget {
     Favorites,
-    Album {
-        name: String,
-        tracks: Vec<Track>,
-    },
+    Album { name: String, tracks: Vec<Track> },
+    SpotifyAlbum(SpotifyAlbum),
     Local(Playlist),
     Shared(RoomSharedPlaylist),
     Spotify(SpotifyPlaylist),
@@ -640,6 +1036,7 @@ struct EqualizerSettings {
     frequencies: Vec<f64>,
     qs: Vec<f64>,
     types: Vec<String>,
+    enabled: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -693,6 +1090,33 @@ struct RoomSharedPlaylist {
     id: String,
     name: String,
     tracks: Vec<RoomPlaylistTrackReference>,
+}
+
+fn library_playlist_count(
+    local_playlists: &[Playlist],
+    shared_playlists: &[RoomSharedPlaylist],
+    spotify_playlists: &[SpotifyPlaylist],
+    spotify_connected: bool,
+) -> usize {
+    let is_library_playlist = |name: &str| !name.eq_ignore_ascii_case("Favorite Songs");
+    let local_count = local_playlists
+        .iter()
+        .filter(|playlist| is_library_playlist(&playlist.name))
+        .count();
+    let shared_count = shared_playlists
+        .iter()
+        .filter(|playlist| is_library_playlist(&playlist.name))
+        .count();
+    let spotify_count = if spotify_connected {
+        spotify_playlists
+            .iter()
+            .filter(|playlist| is_library_playlist(&playlist.name))
+            .count()
+    } else {
+        0
+    };
+
+    local_count + shared_count + spotify_count
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Deserialize, Serialize)]
@@ -977,6 +1401,7 @@ fn set_equalizer_graph_point(
     types: Signal<Vec<String>>,
     mut preset_id: Signal<String>,
     mut unavailable: Signal<bool>,
+    enabled: bool,
     notice: Signal<String>,
 ) {
     if index >= 10 {
@@ -990,8 +1415,9 @@ fn set_equalizer_graph_point(
     frequencies.set(next_frequencies);
     gains.set(next_gains);
     preset_id.set("custom".to_string());
-    unavailable
-        .set(set_equalizer_state(&gains(), &frequencies(), &qs(), &types(), notice).is_err());
+    unavailable.set(
+        set_equalizer_state(&gains(), &frequencies(), &qs(), &types(), enabled, notice).is_err(),
+    );
 }
 
 fn set_equalizer_state(
@@ -999,6 +1425,7 @@ fn set_equalizer_state(
     frequencies: &[f64],
     qs: &[f64],
     types: &[String],
+    enabled: bool,
     mut notice: Signal<String>,
 ) -> Result<(), ()> {
     let settings = EqualizerSettings {
@@ -1006,6 +1433,7 @@ fn set_equalizer_state(
         frequencies: frequencies.to_vec(),
         qs: qs.to_vec(),
         types: types.to_vec(),
+        enabled,
     };
     match browser::set_equalizer(&settings) {
         Ok(()) => Ok(()),
@@ -1013,6 +1441,76 @@ fn set_equalizer_state(
             notice.set(error);
             Err(())
         }
+    }
+}
+
+fn initialize_saved_equalizer(mut notice: Signal<String>) {
+    let enabled = match browser::load::<bool>("wavelength-equalizer-enabled") {
+        Ok(Some(enabled)) => enabled,
+        Ok(None) => false,
+        Err(error) => {
+            notice.set(error);
+            return;
+        }
+    };
+    if !enabled {
+        return;
+    }
+
+    let mut errors = Vec::new();
+    let gains = load_equalizer_values("wavelength-equalizer-gains", vec![0.0; 10], -18.0, 18.0)
+        .unwrap_or_else(|error| {
+            errors.push(error);
+            vec![0.0; 10]
+        });
+    let frequencies = load_equalizer_values(
+        "wavelength-equalizer-frequencies",
+        vec![
+            60.0, 170.0, 310.0, 600.0, 1000.0, 3000.0, 6000.0, 12000.0, 14000.0, 16000.0,
+        ],
+        20.0,
+        20000.0,
+    )
+    .unwrap_or_else(|error| {
+        errors.push(error);
+        vec![
+            60.0, 170.0, 310.0, 600.0, 1000.0, 3000.0, 6000.0, 12000.0, 14000.0, 16000.0,
+        ]
+    });
+    let qs = load_equalizer_values("wavelength-equalizer-qs", vec![1.1; 10], 0.3, 10.0)
+        .unwrap_or_else(|error| {
+            errors.push(error);
+            vec![1.1; 10]
+        });
+    let types = match browser::load::<Vec<String>>("wavelength-equalizer-types") {
+        Ok(Some(values))
+            if values.len() == 10 && values.iter().all(|value| equalizer_type_valid(value)) =>
+        {
+            values
+        }
+        Ok(Some(_)) => {
+            errors.push("Saved equalizer filter types are invalid.".to_string());
+            vec!["peaking".to_string(); 10]
+        }
+        Ok(None) => vec!["peaking".to_string(); 10],
+        Err(error) => {
+            errors.push(error);
+            vec!["peaking".to_string(); 10]
+        }
+    };
+
+    let settings = EqualizerSettings {
+        gains,
+        frequencies,
+        qs,
+        types,
+        enabled: true,
+    };
+    if let Err(error) = browser::set_equalizer(&settings) {
+        errors.push(error);
+    }
+    if !errors.is_empty() {
+        notice.set(errors.join(" "));
     }
 }
 
@@ -1396,26 +1894,261 @@ fn load_spotify_playlists(
     });
 }
 
+fn load_spotify_collections(
+    mut playlists: Signal<Vec<SpotifyPlaylist>>,
+    mut playlists_busy: Signal<bool>,
+    mut albums: Signal<Vec<SpotifyAlbum>>,
+    mut albums_busy: Signal<bool>,
+    mut notice: Signal<String>,
+) {
+    playlists_busy.set(true);
+    albums_busy.set(true);
+    spawn(async move {
+        let playlist_result = browser::spotify_playlists().await;
+        let album_result = browser::spotify_albums().await;
+        let mut errors = Vec::new();
+        match playlist_result {
+            Ok(items) => playlists.set(items),
+            Err(error) => errors.push(format!("Could not load Spotify playlists: {error}")),
+        }
+        match album_result {
+            Ok(items) => albums.set(items),
+            Err(error) => errors.push(format!("Could not load Spotify albums: {error}")),
+        }
+        notice.set(errors.join("\n"));
+        playlists_busy.set(false);
+        albums_busy.set(false);
+    });
+}
+
 fn load_spotify_playlist(
     playlist: SpotifyPlaylist,
     mut tracks: Signal<Vec<Track>>,
     mut selected: Signal<Option<SpotifyPlaylist>>,
     mut selected_name: Signal<String>,
     mut busy: Signal<bool>,
+    mut load_error: Signal<Option<String>>,
+    mut load_id: Signal<u64>,
     mut notice: Signal<String>,
+    mut page: Signal<Page>,
 ) {
+    let request_id = (load_id)().wrapping_add(1);
+    load_id.set(request_id);
     selected.set(Some(playlist.clone()));
     selected_name.set(playlist.name.clone());
+    tracks.set(Vec::new());
+    load_error.set(None);
+    notice.set(String::new());
     busy.set(true);
-    spawn(async move {
-        match browser::spotify_playlist_tracks(&playlist.id).await {
+    page.set(Page::SpotifyPlaylistDetail);
+    spawn_forever(async move {
+        if let Err(error) = browser::scroll_content_to_top().await {
+            notice.set(error);
+        }
+    });
+    spawn_forever(async move {
+        let result = browser::spotify_playlist_tracks(&playlist.id).await;
+        if load_id() != request_id
+            || !selected()
+                .as_ref()
+                .is_some_and(|item| item.id == playlist.id)
+        {
+            return;
+        }
+        match result {
             Ok(items) => {
                 tracks.set(items);
+                load_error.set(None);
                 notice.set(String::new());
             }
-            Err(error) => notice.set(error),
+            Err(error) => {
+                load_error.set(Some(error));
+            }
         }
         busy.set(false);
+    });
+}
+
+fn load_spotify_album(
+    album: SpotifyAlbum,
+    mut selected: Signal<Option<SpotifyAlbum>>,
+    mut tracks: Signal<Vec<Track>>,
+    mut busy: Signal<bool>,
+    mut load_error: Signal<Option<String>>,
+    mut load_id: Signal<u64>,
+    mut album_name: Signal<Option<String>>,
+    mut page: Signal<Page>,
+    mut notice: Signal<String>,
+) {
+    let request_id = (load_id)().wrapping_add(1);
+    load_id.set(request_id);
+    selected.set(Some(album.clone()));
+    tracks.set(Vec::new());
+    load_error.set(None);
+    notice.set(String::new());
+    album_name.set(Some(album.name.clone()));
+    page.set(Page::AlbumDetail);
+    busy.set(true);
+    spawn_forever(async move {
+        let result = browser::spotify_album_tracks(&album).await;
+        if load_id() != request_id || !selected().as_ref().is_some_and(|item| item.id == album.id) {
+            return;
+        }
+        match result {
+            Ok(items) => {
+                tracks.set(items);
+                load_error.set(None);
+                notice.set(String::new());
+            }
+            Err(error) => {
+                load_error.set(Some(error));
+            }
+        }
+        busy.set(false);
+    });
+}
+
+fn focus_search_bar(mut notice: Signal<String>) {
+    spawn(async move {
+        let script = "const input = document.getElementById('topbar-search-input'); if (!(input instanceof HTMLInputElement)) throw new Error('Search field not found'); input.focus();";
+        if let Err(error) = dioxus::document::eval(script).await {
+            notice.set(format!("Could not focus the search field: {error}"));
+        }
+    });
+}
+
+fn play_spotify_album(
+    album: SpotifyAlbum,
+    current: Signal<Option<Track>>,
+    audio_src: Signal<String>,
+    playing: Signal<bool>,
+    queue: Signal<Vec<Track>>,
+    history: Signal<Vec<Track>>,
+    mut notice: Signal<String>,
+    queue_panel_open: Signal<bool>,
+    room_panel_open: Signal<bool>,
+) {
+    spawn(async move {
+        match browser::spotify_album_tracks(&album).await {
+            Ok(tracks) => play_playlist_tracks(
+                tracks,
+                current,
+                audio_src,
+                playing,
+                queue,
+                history,
+                notice,
+                queue_panel_open,
+                room_panel_open,
+            ),
+            Err(error) => notice.set(error),
+        }
+    });
+}
+
+fn queue_spotify_album(album: SpotifyAlbum, queue: Signal<Vec<Track>>, mut notice: Signal<String>) {
+    spawn(async move {
+        match browser::spotify_album_tracks(&album).await {
+            Ok(tracks) => add_tracks_to_queue(tracks, queue, notice),
+            Err(error) => notice.set(error),
+        }
+    });
+}
+
+fn download_spotify_album(album: SpotifyAlbum, format: String, mut notice: Signal<String>) {
+    spawn(async move {
+        match browser::spotify_album_tracks(&album).await {
+            Ok(tracks) => download_tracks(tracks, format, notice),
+            Err(error) => notice.set(error),
+        }
+    });
+}
+
+fn queue_spotify_playlist(
+    playlist: SpotifyPlaylist,
+    queue: Signal<Vec<Track>>,
+    mut notice: Signal<String>,
+) {
+    spawn(async move {
+        match browser::spotify_playlist_tracks(&playlist.id).await {
+            Ok(tracks) => add_tracks_to_queue(tracks, queue, notice),
+            Err(error) => notice.set(error),
+        }
+    });
+}
+
+fn download_spotify_playlist(
+    playlist: SpotifyPlaylist,
+    format: String,
+    mut notice: Signal<String>,
+) {
+    spawn(async move {
+        match browser::spotify_playlist_tracks(&playlist.id).await {
+            Ok(tracks) => download_tracks(tracks, format, notice),
+            Err(error) => notice.set(error),
+        }
+    });
+}
+
+fn add_tracks_to_queue(
+    tracks: Vec<Track>,
+    mut queue: Signal<Vec<Track>>,
+    mut notice: Signal<String>,
+) {
+    if tracks.is_empty() {
+        notice.set("This collection has no tracks to add.".to_string());
+        return;
+    }
+
+    let total = tracks.len();
+    spawn(async move {
+        let mut items = queue();
+        let mut local_added = 0;
+        let mut room_sent = 0;
+        for track in tracks {
+            match browser::emit_room_command(
+                "add-track",
+                &serde_json::json!({"track":room_track_json(&track)}),
+            )
+            .await
+            {
+                Ok(status) if status == "sent" => {
+                    room_sent += 1;
+                    continue;
+                }
+                Ok(status) if status == "unavailable" => {
+                    notice.set("The room connection is not ready. Try again shortly.".to_string());
+                    return;
+                }
+                Ok(status) if status == "permission-denied" => {
+                    notice.set(room_permission_notice("add-track").to_string());
+                    return;
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    notice.set(error);
+                    return;
+                }
+            }
+            items.push(track);
+            local_added += 1;
+        }
+
+        if local_added > 0 {
+            queue.set(items.clone());
+            if let Err(error) = browser::save("wavelength-queue", &items) {
+                notice.set(error);
+                return;
+            }
+        }
+        if room_sent == total {
+            notice.set(format!("Sent {room_sent} tracks to the room queue."));
+        } else {
+            notice.set(format!(
+                "Added {} tracks to the queue.",
+                local_added + room_sent
+            ));
+        }
     });
 }
 
@@ -1427,7 +2160,8 @@ fn play_playlist_tracks(
     mut queue: Signal<Vec<Track>>,
     history: Signal<Vec<Track>>,
     mut notice: Signal<String>,
-    mut page: Signal<Page>,
+    mut queue_panel_open: Signal<bool>,
+    mut room_panel_open: Signal<bool>,
 ) {
     let Some((first, rest)) = tracks.split_first() else {
         notice.set("This playlist has no tracks to play.".to_string());
@@ -1445,7 +2179,8 @@ fn play_playlist_tracks(
         history,
         notice,
     );
-    page.set(Page::Queue);
+    room_panel_open.set(false);
+    queue_panel_open.set(true);
 }
 
 fn play_spotify_playlist(
@@ -1456,12 +2191,21 @@ fn play_spotify_playlist(
     queue: Signal<Vec<Track>>,
     history: Signal<Vec<Track>>,
     mut notice: Signal<String>,
-    page: Signal<Page>,
+    queue_panel_open: Signal<bool>,
+    room_panel_open: Signal<bool>,
 ) {
     spawn(async move {
         match browser::spotify_playlist_tracks(&playlist.id).await {
             Ok(tracks) => play_playlist_tracks(
-                tracks, current, audio_src, playing, queue, history, notice, page,
+                tracks,
+                current,
+                audio_src,
+                playing,
+                queue,
+                history,
+                notice,
+                queue_panel_open,
+                room_panel_open,
             ),
             Err(error) => notice.set(error),
         }
@@ -1480,7 +2224,7 @@ fn create_spotify_playlist(
     mut name: Signal<String>,
     mut playlists: Signal<Vec<SpotifyPlaylist>>,
     mut busy: Signal<bool>,
-    mut page: Signal<Page>,
+    mut dialog_open: Signal<bool>,
     mut notice: Signal<String>,
 ) {
     let clean_name = name().trim().to_string();
@@ -1498,7 +2242,7 @@ fn create_spotify_playlist(
                     playlists.set(all);
                 }
                 name.set(String::new());
-                page.set(Page::SpotifyPlaylists);
+                dialog_open.set(false);
                 notice.set("Spotify playlist created.".to_string());
             }
             Err(error) => notice.set(error),
@@ -1668,7 +2412,12 @@ fn remove_queue_item(index: usize, mut queue: Signal<Vec<Track>>, mut notice: Si
             return;
         }
         let track = items[index].clone();
-        match browser::emit_room_command("remove-track", &serde_json::json!({"trackId":track.key()})).await {
+        match browser::emit_room_command(
+            "remove-track",
+            &serde_json::json!({"trackId":track.key()}),
+        )
+        .await
+        {
             Ok(status) if status == "sent" => {
                 notice.set("Queue change sent to the room.".to_string());
                 return;
@@ -1701,7 +2450,10 @@ fn move_queue_item(
 ) {
     spawn(async move {
         let items = queue();
-        if source_index >= items.len() || target_index >= items.len() || source_index == target_index {
+        if source_index >= items.len()
+            || target_index >= items.len()
+            || source_index == target_index
+        {
             return;
         }
         let track_id = items[source_index].key().to_string();
@@ -1898,14 +2650,9 @@ fn next_track(
         let mut items = queue();
         if items.is_empty() {
             let active = current();
-            let target = select_track_from_source(
-                &source,
-                active.as_ref(),
-                1,
-                shuffle(),
-                random_unit_f64(),
-            )
-            .or_else(|| (repeat_mode() == "all").then(|| active.clone()).flatten());
+            let target =
+                select_track_from_source(&source, active.as_ref(), 1, shuffle(), random_unit_f64())
+                    .or_else(|| (repeat_mode() == "all").then(|| active.clone()).flatten());
             if let Some(track) = target.filter(|track| {
                 repeat_mode() == "all"
                     || active
@@ -2034,15 +2781,71 @@ fn previous_track(
     });
 }
 
-fn download_track(track: Track, mut notice: Signal<String>) {
+fn download_track(track: Track, format: String, mut notice: Signal<String>) {
     let id = track.audio_service_id();
     let filename = format!("{} - {}", track.artist, track.title);
+    let format = match validate_download_format(&format) {
+        Ok(format) => format,
+        Err(error) => {
+            notice.set(error);
+            return;
+        }
+    };
     spawn(async move {
-        match browser::download(&id, &filename).await {
+        match browser::download(&id, &filename, format).await {
             Ok(name) => notice.set(format!("Downloaded {name}")),
             Err(error) => notice.set(error),
         }
     });
+}
+
+fn download_tracks(tracks: Vec<Track>, format: String, mut notice: Signal<String>) {
+    let tracks = tracks
+        .into_iter()
+        .filter(|track| !track.is_local())
+        .collect::<Vec<_>>();
+    if tracks.is_empty() {
+        notice.set("This collection has no downloadable tracks.".to_string());
+        return;
+    }
+
+    let format = match validate_download_format(&format) {
+        Ok(format) => format,
+        Err(error) => {
+            notice.set(error);
+            return;
+        }
+    };
+    let total = tracks.len();
+    spawn(async move {
+        let mut downloaded = 0;
+        let mut first_error = None;
+        for track in tracks {
+            let id = track.audio_service_id();
+            let filename = format!("{} - {}", track.artist, track.title);
+            match browser::download(&id, &filename, format).await {
+                Ok(_) => downloaded += 1,
+                Err(error) if first_error.is_none() => first_error = Some(error),
+                Err(_) => {}
+            }
+        }
+
+        if let Some(error) = first_error {
+            notice.set(format!(
+                "Downloaded {downloaded} of {total} tracks. {error}"
+            ));
+        } else {
+            notice.set(format!("Downloaded {downloaded} tracks."));
+        }
+    });
+}
+
+fn validate_download_format(format: &str) -> Result<&'static str, String> {
+    match format {
+        "flac" => Ok("flac"),
+        "mp3" => Ok("mp3"),
+        _ => Err("Choose FLAC or MP3 as the download format in Settings.".to_string()),
+    }
 }
 
 fn toggle_room_permission(
@@ -2073,7 +2876,14 @@ fn toggle_room_permission(
     let host = host_token();
     spawn(async move {
         let client = browser::RoomClient::new(&url, &access);
-        match client.update(&code, &serde_json::json!({"username": name, "permissions": updated}), &host).await {
+        match client
+            .update(
+                &code,
+                &serde_json::json!({"username": name, "permissions": updated}),
+                &host,
+            )
+            .await
+        {
             Ok(party) => permissions.set(party.permissions),
             Err(error) => {
                 permissions.set(previous);
@@ -2321,7 +3131,19 @@ fn switch_room(
     if let Err(error) = persist_active_room_session(&session) {
         notice.set(error);
     }
-    let _ = (queue, current, audio_src, playing, playhead, media_duration, shuffle, repeat_mode, local_tracks, history, room_sessions);
+    let _ = (
+        queue,
+        current,
+        audio_src,
+        playing,
+        playhead,
+        media_duration,
+        shuffle,
+        repeat_mode,
+        local_tracks,
+        history,
+        room_sessions,
+    );
 }
 
 fn join_room(
@@ -2486,9 +3308,8 @@ fn create_room(
 }
 
 fn upsert_room_session(sessions: &mut Vec<RoomSession>, session: RoomSession) {
-    sessions.retain(|existing| {
-        existing.code != session.code || existing.room_url != session.room_url
-    });
+    sessions
+        .retain(|existing| existing.code != session.code || existing.room_url != session.room_url);
     sessions.push(session);
 }
 
@@ -2648,6 +3469,7 @@ fn end_room(
     mut members: Signal<Vec<String>>,
     mut permissions: Signal<RoomPermissions>,
     mut shared_playlists: Signal<Vec<RoomSharedPlaylist>>,
+    mut room_sessions: Signal<Vec<RoomSession>>,
     queue: Signal<Vec<Track>>,
     mut notice: Signal<String>,
 ) {
@@ -2670,6 +3492,15 @@ fn end_room(
         match result {
             Ok(_) => {
                 let mut cleanup_error = persist_active_room_session(&RoomSession::default()).err();
+                let mut sessions = room_sessions();
+                if remove_room_session(&mut sessions, &url, &code) {
+                    room_sessions.set(sessions.clone());
+                    if let Err(error) = browser::save("wavelength-party-sessions", &sessions) {
+                        cleanup_error.get_or_insert(format!(
+                            "Could not update saved room sessions: {error}"
+                        ));
+                    }
+                }
                 if role == "guest" {
                     if let Err(error) = restore_guest_queue(queue) {
                         cleanup_error.get_or_insert(error);
@@ -2834,6 +3665,7 @@ fn resolve_room_playlist(
     Playlist {
         id: playlist.id.clone(),
         name: playlist.name.clone(),
+        thumbnail: None,
         tracks,
     }
 }
@@ -3059,14 +3891,15 @@ async fn room_sync_loop(
                         room_permissions.set(RoomPermissions::default());
                         room_shared_playlists.set(Vec::new());
                         notice.set(queue_restore_error.map_or_else(
-                            || if role == "guest" {
-                                "The room was closed by its host.".to_string()
-                            } else {
-                                "The room expired after its last listener disconnected.".to_string()
+                            || {
+                                if role == "guest" {
+                                    "The room was closed by its host.".to_string()
+                                } else {
+                                    "The room expired after its last listener disconnected."
+                                        .to_string()
+                                }
                             },
-                            |error| format!(
-                                "The room ended. Queue restoration failed: {error}"
-                            ),
+                            |error| format!("The room ended. Queue restoration failed: {error}"),
                         ));
                         clear_saved_room_session(room_sessions, &url, &code, notice);
                         break;
@@ -3121,11 +3954,13 @@ async fn room_sync_loop(
                     }
                 }
                 shuffle.set(party.shuffle);
-                repeat_mode.set(if matches!(party.repeat_mode.as_str(), "off" | "all" | "one") {
-                    party.repeat_mode.clone()
-                } else {
-                    "off".to_string()
-                });
+                repeat_mode.set(
+                    if matches!(party.repeat_mode.as_str(), "off" | "all" | "one") {
+                        party.repeat_mode.clone()
+                    } else {
+                        "off".to_string()
+                    },
+                );
                 let shared_queue = party.queue.iter().map(room_track_json).collect::<Vec<_>>();
                 last_host_state = room_host_state_signature(
                     &shared_queue,
@@ -3230,7 +4065,9 @@ async fn room_sync_loop(
                 .into_iter()
                 .filter(|track| !track.is_local() || track.audio_id.is_some())
                 .collect::<Vec<_>>();
-            if let Some(track) = current().filter(|track| !track.is_local() || track.audio_id.is_some()) {
+            if let Some(track) =
+                current().filter(|track| !track.is_local() || track.audio_id.is_some())
+            {
                 if !shared_queue.iter().any(|item| item.key() == track.key()) {
                     shared_queue.insert(0, track);
                 }
@@ -3296,9 +4133,11 @@ async fn room_sync_loop(
             room_shared_playlists.set(Vec::new());
             notice.set(queue_restore_error.map_or_else(
                 || "You are no longer a member of this room.".to_string(),
-                |error| format!(
-                    "You are no longer a member of this room. Queue restoration failed: {error}"
-                ),
+                |error| {
+                    format!(
+                        "You are no longer a member of this room. Queue restoration failed: {error}"
+                    )
+                },
             ));
             clear_saved_room_session(room_sessions, &url, &code, notice);
             continue;
@@ -3601,8 +4440,7 @@ fn home_statistics(
         }
     } else {
         for event in events.iter().filter(|event| {
-            timestamp_millis(&event.played_at)
-                .is_some_and(|played_at| played_at >= cutoff)
+            timestamp_millis(&event.played_at).is_some_and(|played_at| played_at >= cutoff)
         }) {
             let artist = if event.artist.trim().is_empty() {
                 "Unknown artist"
@@ -3767,8 +4605,21 @@ fn parse_synced_lyrics(source: &str) -> Vec<LyricLine> {
     result
 }
 
+fn lyric_track_key(track: &Track) -> String {
+    format!(
+        "{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{:?}",
+        track.source.as_deref().unwrap_or_default(),
+        track.key(),
+        track.title.trim(),
+        track.artist.trim(),
+        track.album.as_deref().unwrap_or_default(),
+        track.duration
+    )
+}
+
 fn load_track_lyrics(
     track: Track,
+    lyric_track_id: Signal<String>,
     mut lyrics: Signal<String>,
     mut lines: Signal<Vec<LyricLine>>,
     mut loading: Signal<bool>,
@@ -3781,24 +4632,26 @@ fn load_track_lyrics(
         return;
     }
     loading.set(true);
+    let request_id = lyric_track_key(&track);
     spawn(async move {
-        match browser::lyrics(&track.title, &track.artist).await {
+        let response = browser::lyrics(
+            &track.title,
+            &track.artist,
+            track.album.as_deref().unwrap_or_default(),
+            track.duration.unwrap_or_default(),
+            track.source.as_deref().unwrap_or_default(),
+        )
+        .await;
+        if lyric_track_id() != request_id {
+            return;
+        }
+        match response {
             Ok(Some(response)) => {
-                let prefer_plain = track
-                    .source
-                    .as_deref()
-                    .is_some_and(|source| source.eq_ignore_ascii_case("youtube"));
-                let text = if prefer_plain {
-                    response
-                        .plain_lyrics
-                        .or(response.synced_lyrics)
-                        .unwrap_or_default()
-                } else {
-                    response
-                        .synced_lyrics
-                        .or(response.plain_lyrics)
-                        .unwrap_or_default()
-                };
+                let text = response
+                    .synced_lyrics
+                    .filter(|text| !text.trim().is_empty())
+                    .or_else(|| response.plain_lyrics.filter(|text| !text.trim().is_empty()))
+                    .unwrap_or_default();
                 if text.trim().is_empty() {
                     lyrics.set("No lyrics found.".to_string());
                 } else {

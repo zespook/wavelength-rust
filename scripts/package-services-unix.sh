@@ -47,6 +47,7 @@ mkdir -p "$SERVICE_DIST" "$SERVICE_WORK" "$SERVICE_SPEC" \
 	--collect-all spotipy \
 	--collect-all SpotiFLAC \
 	--collect-all yt_dlp \
+	--collect-all imageio_ffmpeg \
 	--collect-all packaging \
 	--collect-all mutagen \
 	--collect-all certifi \

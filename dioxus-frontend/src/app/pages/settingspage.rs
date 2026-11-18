@@ -1,6 +1,7 @@
 use super::super::AppState;
 use super::PageData;
 use crate::browser;
+use crate::components::CustomSelect;
 use crate::*;
 use dioxus::prelude::*;
 
@@ -8,9 +9,13 @@ use dioxus::prelude::*;
 #[component]
 pub(super) fn SettingsPage(data: std::rc::Rc<PageData>) -> Element {
     let mut app_state = use_context::<AppState>();
+    let has_spotify_photo = (app_state.spotify_profile)()
+        .as_ref()
+        .is_some_and(|profile| profile.images.iter().any(|image| !image.url.is_empty()));
     let font_scale = (app_state.font_scale)();
     let font_scale_percent = (font_scale * 100.0).round() as u32;
     let download_folder_name = (app_state.download_folder_name)();
+    let download_format = (app_state.download_format)();
     let app_version = format!(
         "Version {} · {}",
         env!("CARGO_PKG_VERSION"),
@@ -33,13 +38,15 @@ pub(super) fn SettingsPage(data: std::rc::Rc<PageData>) -> Element {
                                 strong { "Profile picture" }
                                 small {
                                     if (app_state.local_avatar)().is_some() {
-                                        "Using a photo saved on this device"
-                                    } else if (app_state.spotify_profile)().as_ref().is_some_and(|profile| {
-                                        profile.images.iter().any(|image| !image.url.is_empty())
-                                    }) {
-                                        "Using your Spotify profile photo"
+                                        if has_spotify_photo {
+                                            "Using a local photo. You can switch to your Spotify photo."
+                                        } else {
+                                            "Using a photo saved on this device"
+                                        }
+                                    } else if has_spotify_photo {
+                                        "Choose a local photo or use your Spotify profile photo."
                                     } else {
-                                        "Choose a photo saved on this device"
+                                        "Choose a local photo"
                                     }
                                 }
                             }
@@ -55,20 +62,22 @@ pub(super) fn SettingsPage(data: std::rc::Rc<PageData>) -> Element {
                                             Err(error) => app_state.notice.set(error),
                                         }
                                     });
-                                }, "Choose photo" }
-                                if (app_state.local_avatar)().is_some() {
+                                }, "Choose from device" }
+                                if has_spotify_photo {
+                                    button { class: "text-button", onclick: move |_| {
+                                        if (app_state.local_avatar)().is_some() {
+                                            app_state.local_avatar.set(None);
+                                            save_saved("wavelength-avatar", &Option::<String>::None, app_state.notice);
+                                        }
+                                    },
+                                        disabled: (app_state.local_avatar)().is_none(),
+                                        if (app_state.local_avatar)().is_some() { "Use Spotify photo" } else { "Using Spotify photo" }
+                                    }
+                                } else if (app_state.local_avatar)().is_some() {
                                     button { class: "text-button", onclick: move |_| {
                                         app_state.local_avatar.set(None);
                                         save_saved("wavelength-avatar", &Option::<String>::None, app_state.notice);
-                                    },
-                                        if (app_state.spotify_profile)().as_ref().is_some_and(|profile| {
-                                            profile.images.iter().any(|image| !image.url.is_empty())
-                                        }) {
-                                            "Use Spotify photo"
-                                        } else {
-                                            "Remove photo"
-                                        }
-                                    }
+                                    }, "Remove photo" }
                                 }
                             }
                         }
@@ -79,23 +88,26 @@ pub(super) fn SettingsPage(data: std::rc::Rc<PageData>) -> Element {
                                     if let Some(profile) = (app_state.spotify_profile)() {
                                         "Connected as {profile.display_name.as_deref().filter(|name| !name.is_empty()).unwrap_or(&profile.id)}"
                                     } else {
-                                        "Connect your account to search Spotify directly"
+                                        "Not connected"
                                     }
                                 }
                             }
                             div { class: "settings-row-actions",
                                 if (app_state.spotify_profile)().is_some() {
-                                    button { class: "outline-button compact-action", onclick: move |_| {
-                                        app_state.page.set(Page::SpotifyLibrary);
-                                        load_spotify_library(app_state.spotify_tracks, app_state.spotify_busy, app_state.notice);
-                                    }, "Saved tracks" }
-                                    button { class: "outline-button compact-action", onclick: move |_| {
-                                        app_state.page.set(Page::SpotifyPlaylists);
-                                        load_spotify_playlists(app_state.spotify_playlists, app_state.spotify_playlists_busy, app_state.notice);
-                                    }, "Playlists" }
                                     button { class: "text-button", onclick: move |_| {
                                         match browser::disconnect_spotify() {
-                                            Ok(()) => { app_state.spotify_profile.set(None); app_state.notice.set("Spotify disconnected.".to_string()); }
+                                            Ok(()) => {
+                                                app_state.spotify_profile.set(None);
+                                                app_state.spotify_tracks.set(Vec::new());
+                                                app_state.spotify_playlists.set(Vec::new());
+                                                app_state.spotify_albums.set(Vec::new());
+                                                app_state.spotify_playlist_selected.set(None);
+                                                app_state.spotify_playlist_tracks.set(Vec::new());
+                                                app_state.spotify_album_selected.set(None);
+                                                app_state.spotify_album_tracks.set(Vec::new());
+                                                app_state.spotify_collections_page_loaded.set(false);
+                                                app_state.notice.set("Spotify disconnected.".to_string());
+                                            }
                                             Err(error) => app_state.notice.set(error),
                                         }
                                     }, "Disconnect" }
@@ -115,21 +127,6 @@ pub(super) fn SettingsPage(data: std::rc::Rc<PageData>) -> Element {
                                             }
                                         });
                                     }, "Connect" }
-                                }
-                            }
-                        }
-                        if (app_state.spotify_profile)().is_some() {
-                            div { class: "settings-row settings-inline-form-row",
-                                div { class: "settings-row-copy",
-                                    strong { "Create a Spotify playlist" }
-                                    small { "Start a new playlist in your connected account" }
-                                }
-                                form { class: "create-playlist-form", onsubmit: move |event| {
-                                    event.prevent_default();
-                                    create_spotify_playlist(app_state.spotify_playlist_create_name, app_state.spotify_playlists, app_state.spotify_playlist_create_busy, app_state.page, app_state.notice);
-                                },
-                                    input { value: "{(app_state.spotify_playlist_create_name)()}", placeholder: "New Spotify playlist", aria_label: "New Spotify playlist", oninput: move |event| app_state.spotify_playlist_create_name.set(event.value()) }
-                                    button { class: "outline-button compact-action", r#type: "submit", disabled: (app_state.spotify_playlist_create_busy)() || (app_state.spotify_playlist_create_name)().trim().is_empty(), "Create playlist" }
                                 }
                             }
                         }
@@ -194,24 +191,26 @@ pub(super) fn SettingsPage(data: std::rc::Rc<PageData>) -> Element {
                                         },
                                         if download_folder_name.is_empty() { "Choose folder" } else { "Change" }
                                     }
-                                    if !download_folder_name.is_empty() {
-                                        button {
-                                            class: "text-button",
-                                            onclick: move |_| {
-                                                let mut folder_name = app_state.download_folder_name;
-                                                let mut notice = app_state.notice;
-                                                spawn(async move {
-                                                    match browser::clear_download_folder().await {
-                                                        Ok(()) => {
-                                                            folder_name.set(String::new());
-                                                            notice.set(String::new());
-                                                        }
-                                                        Err(error) => notice.set(error),
-                                                    }
-                                                });
-                                            },
-                                            "Use browser default"
-                                        }
+                                }
+                            }
+                        }
+                        div { class: "settings-row",
+                            div { class: "settings-row-copy",
+                                strong { "Download format" }
+                                small { "Save downloads as FLAC by default, or choose MP3." }
+                            }
+                            div { class: "settings-row-actions",
+                                CustomSelect {
+                                    value: download_format,
+                                    options: vec![
+                                        ("flac".to_string(), "FLAC".to_string()),
+                                        ("mp3".to_string(), "MP3".to_string()),
+                                    ],
+                                    aria_label: "Download format",
+                                    class_name: "download-format-select",
+                                    on_change: move |format: String| {
+                                        app_state.download_format.set(format.clone());
+                                        save_saved("wavelength-download-format", &format, app_state.notice);
                                     }
                                 }
                             }
@@ -404,7 +403,7 @@ pub(super) fn SettingsPage(data: std::rc::Rc<PageData>) -> Element {
                                 if (app_state.update_checking)() {
                                     "Checking…"
                                 } else if (app_state.window_controls_available)() {
-                                    "Check now"
+                                    "Check"
                                 } else {
                                     "Desktop app only"
                                 }

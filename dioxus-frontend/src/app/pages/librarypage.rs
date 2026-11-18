@@ -98,7 +98,7 @@ pub(super) fn LibraryPage(data: std::rc::Rc<PageData>) -> Element {
                                                 on_play: move |track| play_track(track, app_state.current, app_state.audio_src, app_state.playing, app_state.queue, app_state.history, app_state.notice),
                                                 on_queue: move |track| add_to_queue(track, app_state.queue, app_state.notice),
                                                 on_favorite: move |track| toggle_favorite(track, app_state.favorites, app_state.notice),
-                                                on_download: move |track| download_track(track, app_state.notice),
+                                                on_download: move |track| download_track(track, (app_state.download_format)(), app_state.notice),
                                                 on_context: move |menu| app_state.context_track.set(Some(menu)),
                                             }
                                         }
@@ -139,6 +139,7 @@ pub(super) fn LibraryPage(data: std::rc::Rc<PageData>) -> Element {
                                             onclick: {
                                                 let album_name = name.clone();
                                                 move |_| {
+                                                    app_state.spotify_album_selected.set(None);
                                                     app_state.album_detail_name.set(Some(album_name.clone()));
                                                     app_state.page.set(Page::AlbumDetail);
                                                 }
@@ -157,7 +158,7 @@ pub(super) fn LibraryPage(data: std::rc::Rc<PageData>) -> Element {
                                                 on_play: move |track| play_track(track, app_state.current, app_state.audio_src, app_state.playing, app_state.queue, app_state.history, app_state.notice),
                                                 on_queue: move |track| add_to_queue(track, app_state.queue, app_state.notice),
                                                 on_favorite: move |track| toggle_favorite(track, app_state.favorites, app_state.notice),
-                                                on_download: move |track| download_track(track, app_state.notice),
+                                                on_download: move |track| download_track(track, (app_state.download_format)(), app_state.notice),
                                                 on_context: move |menu| app_state.context_track.set(Some(menu)),
                                             }
                                         }

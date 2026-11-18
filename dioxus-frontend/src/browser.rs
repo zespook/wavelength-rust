@@ -1,12 +1,12 @@
 use crate::{
     AccessResult, DownloadStatus, DownloadStatusResponse, EqualizerSettings, LyricsResponse,
-    RoomParty, RoomPermissions, RoomResult, RoomSocketEvent, SpotifyPlaylist, SpotifyRestore, Track,
-    UpdateInfo,
+    RoomParty, RoomPermissions, RoomResult, RoomSocketEvent, SpotifyAlbum, SpotifyPlaylist,
+    SpotifyRestore, Track, UpdateInfo,
 };
 use serde::{Deserialize, Serialize};
 
 #[cfg(target_arch = "wasm32")]
-use crate::{format_error, AUDIO_SERVICE};
+use crate::{AUDIO_SERVICE, format_error};
 
 #[cfg(target_arch = "wasm32")]
 #[path = "browser_web.rs"]
@@ -40,7 +40,8 @@ impl RoomClient {
             &serde_json::json!({ "passcode": passcode }),
             "",
             "",
-        ).await
+        )
+        .await
     }
 
     pub(crate) async fn create(&self, host: &str) -> Result<RoomResult, String> {
@@ -51,7 +52,8 @@ impl RoomClient {
             &serde_json::json!({ "host": host }),
             &self.access_token,
             "",
-        ).await
+        )
+        .await
     }
 
     pub(crate) async fn join(&self, code: &str, username: &str) -> Result<RoomResult, String> {
@@ -62,7 +64,8 @@ impl RoomClient {
             &serde_json::json!({ "code": code, "username": username }),
             &self.access_token,
             "",
-        ).await
+        )
+        .await
     }
 
     pub(crate) async fn read(&self, code: &str, host_token: &str) -> Result<RoomParty, String> {
@@ -73,7 +76,8 @@ impl RoomClient {
             &serde_json::json!({}),
             &self.access_token,
             host_token,
-        ).await
+        )
+        .await
     }
 
     pub(crate) async fn update(
@@ -89,7 +93,8 @@ impl RoomClient {
             body,
             &self.access_token,
             host_token,
-        ).await
+        )
+        .await
     }
 
     pub(crate) async fn leave(&self, code: &str, username: &str) -> Result<(), String> {
@@ -100,7 +105,9 @@ impl RoomClient {
             &serde_json::json!({ "username": username }),
             &self.access_token,
             "",
-        ).await.map(|_| ())
+        )
+        .await
+        .map(|_| ())
     }
 
     pub(crate) async fn end(&self, code: &str, host_token: &str) -> Result<(), String> {
@@ -111,6 +118,8 @@ impl RoomClient {
             &serde_json::json!({}),
             &self.access_token,
             host_token,
-        ).await.map(|_| ())
+        )
+        .await
+        .map(|_| ())
     }
 }

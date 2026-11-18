@@ -2,9 +2,12 @@ import os
 import asyncio
 import inspect
 import logging
+import math
 import shutil
 import json
 import re
+import subprocess
+import tempfile
 import time
 from importlib import import_module
 from collections import deque
@@ -23,6 +26,7 @@ from spotipy.oauth2 import SpotifyClientCredentials
 from spotipy.cache_handler import CacheFileHandler
 from SpotiFLAC import AsyncSpotiFLAC
 import httpx
+import imageio_ffmpeg
 from yt_dlp import YoutubeDL
 from playlist import (
     _first_image_url,
@@ -51,6 +55,7 @@ _data_dir = os.getenv("WAVELENGTH_DATA_DIR")
 CACHE_DIR = Path(_data_dir) / "cache" if _data_dir else Path(__file__).parent / "cache"
 CACHE_DIR.mkdir(exist_ok=True)
 STATUS_FILE = CACHE_DIR / "download-status.json"
+DOWNLOADED_TRACKS_FILE = CACHE_DIR / "downloaded-tracks.json"
 LOG_FILE = CACHE_DIR / "download-logs.json"
 _log_file_mtime_ns = 0
 SPOTIFY_TOKEN_CACHE = CACHE_DIR / "spotipy-token-cache"
@@ -61,6 +66,7 @@ logger = logging.getLogger("wavelength-audio")
 _downloading = set()
 _download_errors = {}
 _download_status = {}
+_downloaded_tracks = set()
 _download_progress = {}
 _download_retention = {}
 _download_scopes = {}
@@ -118,6 +124,14 @@ try:
     _download_status.update(json.loads(STATUS_FILE.read_text(encoding="utf-8")))
 except (FileNotFoundError, json.JSONDecodeError, OSError):
     pass
+try:
+    downloaded_tracks = json.loads(DOWNLOADED_TRACKS_FILE.read_text(encoding="utf-8"))
+    if isinstance(downloaded_tracks, list):
+        _downloaded_tracks.update(
+            track_id for track_id in downloaded_tracks if isinstance(track_id, str)
+        )
+except (FileNotFoundError, json.JSONDecodeError, OSError):
+    pass
 
 try:
     retention_file = CACHE_DIR / "download-retention.json"
@@ -133,6 +147,12 @@ def _save_download_status():
     temp_file = STATUS_FILE.with_suffix(".tmp")
     temp_file.write_text(json.dumps(_download_status), encoding="utf-8")
     temp_file.replace(STATUS_FILE)
+
+
+def _save_downloaded_tracks():
+    temp_file = DOWNLOADED_TRACKS_FILE.with_suffix(".tmp")
+    temp_file.write_text(json.dumps(sorted(_downloaded_tracks)), encoding="utf-8")
+    temp_file.replace(DOWNLOADED_TRACKS_FILE)
 
 
 def _save_download_retention():
@@ -482,6 +502,7 @@ async def search(
                     "artist": item.get("channel") or item.get("uploader") or "YouTube",
                     "album": "YouTube",
                     "thumbnail": thumbnail,
+                    "duration": duration,
                     "length": duration_string or "—",
                     "url": item.get("webpage_url") or f"https://www.youtube.com/watch?v={item['id']}",
                 })
@@ -785,6 +806,68 @@ def _download_youtube_audio(video_id: str, track_id: str, progress_hook=None):
         ydl.download([f"https://www.youtube.com/watch?v={video_id}"])
 
 
+def _convert_download_audio(source_path: Path, output_format: str) -> Path:
+    if output_format not in {"flac", "mp3"}:
+        raise ValueError("Download format must be FLAC or MP3.")
+    if source_path.suffix.lower() == f".{output_format}":
+        return source_path
+
+    ffmpeg_path = imageio_ffmpeg.get_ffmpeg_exe()
+    output_dir = CACHE_DIR / "download_exports"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    file_descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f"{source_path.stem}-",
+        suffix=f".{output_format}",
+        dir=output_dir,
+    )
+    os.close(file_descriptor)
+    temporary_path = Path(temporary_name)
+    codec = "flac" if output_format == "flac" else "libmp3lame"
+    command = [
+        ffmpeg_path,
+        "-nostdin",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-i",
+        str(source_path),
+        "-map",
+        "0:a:0",
+        "-vn",
+        "-c:a",
+        codec,
+    ]
+    if output_format == "mp3":
+        command.extend(["-q:a", "2"])
+    command.append(str(temporary_path))
+
+    completed = False
+    try:
+        subprocess.run(
+            command,
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            timeout=600,
+        )
+        if not temporary_path.is_file() or temporary_path.stat().st_size == 0:
+            raise RuntimeError(f"FFmpeg did not produce a {output_format.upper()} file.")
+        completed = True
+        return temporary_path
+    except subprocess.CalledProcessError as error:
+        details = error.stderr.decode("utf-8", errors="replace").strip()
+        message = f"Could not convert audio to {output_format.upper()}."
+        if details:
+            message = f"{message} {details[-500:]}"
+        raise RuntimeError(message) from error
+    except subprocess.TimeoutExpired as error:
+        raise RuntimeError(f"Audio conversion to {output_format.upper()} timed out.") from error
+    finally:
+        if not completed:
+            temporary_path.unlink(missing_ok=True)
+
+
 @app.get("/stream/{track_id}")
 async def get_stream(track_id: str, code: str, request: Request, scope: str = Query("permanent")):
     try:
@@ -859,24 +942,28 @@ async def get_stream(track_id: str, code: str, request: Request, scope: str = Qu
 
 
 @app.get("/download/{track_id}")
-async def download_file(track_id: str, code: str, scope: str = Query("permanent")):
+async def download_file(
+    track_id: str,
+    code: str,
+    scope: str = Query("permanent"),
+    format: str = Query("flac"),
+):
+    if format not in {"flac", "mp3"}:
+        raise HTTPException(400, "Download format must be FLAC or MP3.")
     try:
         cache_path = await _download_audio(track_id, scope)
-        media_type = {
-            ".flac": "audio/flac",
-            ".mp3": "audio/mpeg",
-            ".m4a": "audio/mp4",
-            ".mp4": "audio/mp4",
-            ".wav": "audio/wav",
-            ".webm": "audio/webm",
-            ".ogg": "audio/ogg",
-            ".opus": "audio/ogg"
-        }.get(cache_path.suffix.lower(), "application/octet-stream")
+        download_path = await asyncio.to_thread(_convert_download_audio, cache_path, format)
+        if _normalize_download_scope(scope) == "permanent":
+            _downloaded_tracks.add(track_id)
+            _save_downloaded_tracks()
+        converted = download_path != cache_path
+        media_type = "audio/flac" if format == "flac" else "audio/mpeg"
         return FileResponse(
-            cache_path,
+            download_path,
             media_type=media_type,
-            filename=cache_path.name,
-            headers={"Content-Disposition": f'attachment; filename="{cache_path.name}"'}
+            filename=f"{track_id}.{format}",
+            headers={"Content-Disposition": f'attachment; filename="{track_id}.{format}"'},
+            background=BackgroundTask(download_path.unlink, missing_ok=True) if converted else None,
         )
     except Exception as e:
         raise HTTPException(502, f"Download failed: {str(e)}")
@@ -946,39 +1033,207 @@ async def download_status(video_ids: str = Query(...)):
     tracks = {}
     for track_id in ids:
         cached = any(CACHE_DIR.glob(f"{track_id}.*"))
+        downloaded = cached and track_id in _downloaded_tracks
         progress = _download_progress.get(track_id)
         if cached:
-            tracks[track_id] = {"status": "ready", "progress": 100}
+            tracks[track_id] = {"status": "ready", "progress": 100, "downloaded": downloaded}
         elif _download_status.get(track_id) in {"queued", "downloading"} and track_id not in _download_tasks:
             _schedule_download(track_id, _download_scope_for(track_id))
-            tracks[track_id] = {"status": "queued", "progress": progress}
+            tracks[track_id] = {"status": "queued", "progress": progress, "downloaded": downloaded}
         elif track_id in _downloading:
-            tracks[track_id] = {"status": "downloading", "progress": progress}
+            tracks[track_id] = {"status": "downloading", "progress": progress, "downloaded": downloaded}
         elif track_id in _download_errors:
-            tracks[track_id] = {"status": "error", "progress": progress, "error": _download_errors[track_id]}
+            tracks[track_id] = {
+                "status": "error",
+                "progress": progress,
+                "error": _download_errors[track_id],
+                "downloaded": downloaded,
+            }
         else:
-            tracks[track_id] = {"status": _download_status.get(track_id, "pending"), "progress": progress}
+            tracks[track_id] = {
+                "status": _download_status.get(track_id, "pending"),
+                "progress": progress,
+                "downloaded": downloaded,
+            }
     return {"tracks": tracks}
 
 
+_YOUTUBE_LYRICS_ANNOTATIONS = re.compile(
+    r"\s*[\(\[](?=[^\)\]]*\b(?:official|lyrics?|audio|visualizer|remaster(?:ed)?|live|hd|4k)\b)"
+    r"[^\)\]]*[\)\]]",
+    re.IGNORECASE,
+)
+
+
+def _normalize_lyrics_match(value):
+    return " ".join(re.sub(r"[\W_]+", " ", value.casefold()).split())
+
+
+def _clean_youtube_title(title):
+    cleaned = _YOUTUBE_LYRICS_ANNOTATIONS.sub(" ", title)
+    cleaned = re.sub(
+        r"\s*(?:[-–—|•]\s*)?(?:official(?:\s+music)?\s+video|official\s+audio|"
+        r"lyrics?(?:\s+video)?|audio|visualizer|prod(?:uced)?\.?\s+by)\b.*$",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" -–—|•")
+    return cleaned or title.strip()
+
+
+def _clean_youtube_artist(artist):
+    return re.sub(r"\s*(?:-\s*topic|vevo)$", "", artist, flags=re.IGNORECASE).strip()
+
+
+def _lyrics_duration_matches(record, duration):
+    record_duration = record.get("duration")
+    if (
+        not duration
+        or not isinstance(record_duration, (int, float))
+        or isinstance(record_duration, bool)
+        or not math.isfinite(record_duration)
+    ):
+        return True
+    return abs(duration - record_duration) <= max(5, duration * 0.03)
+
+
+def _youtube_lyrics_pair(title, artist):
+    cleaned_title = _clean_youtube_title(title)
+    cleaned_artist = _clean_youtube_artist(artist)
+    parts = re.split(r"\s+[-–—]\s+", cleaned_title, maxsplit=1)
+    if len(parts) == 2:
+        if _normalize_lyrics_match(parts[0]) == _normalize_lyrics_match(cleaned_artist):
+            return parts[1].strip(), parts[0].strip()
+        if _normalize_lyrics_match(parts[1]) == _normalize_lyrics_match(cleaned_artist):
+            return parts[0].strip(), parts[1].strip()
+    return cleaned_title, cleaned_artist
+
+
+def _find_lyrics_search_match(records, title, artist, source, duration):
+    title_variants = [title]
+    artist_variants = [artist]
+    if source == "youtube":
+        cleaned_title = _clean_youtube_title(title)
+        cleaned_artist = _clean_youtube_artist(artist)
+        title_variants.append(cleaned_title)
+        artist_variants.append(cleaned_artist)
+        parts = re.split(r"\s+[-–—]\s+", cleaned_title, maxsplit=1)
+        if len(parts) == 2:
+            title_variants.extend(parts)
+            artist_variants.extend(parts)
+
+    title_keys = {_normalize_lyrics_match(value) for value in title_variants}
+    artist_keys = {_normalize_lyrics_match(value) for value in artist_variants}
+    title_keys.discard("")
+    artist_keys.discard("")
+    best_match = None
+    best_score = -1
+
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        record_title = record.get("trackName") or record.get("name") or ""
+        record_artist = record.get("artistName") or ""
+        if _normalize_lyrics_match(record_title) not in title_keys:
+            continue
+
+        artist_matches = _normalize_lyrics_match(record_artist) in artist_keys
+        if source != "youtube" and not artist_matches:
+            continue
+
+        record_duration = record.get("duration")
+        duration_difference = None
+        if (
+            duration
+            and isinstance(record_duration, (int, float))
+            and not isinstance(record_duration, bool)
+            and math.isfinite(record_duration)
+        ):
+            duration_difference = abs(duration - record_duration)
+            if not _lyrics_duration_matches(record, duration):
+                continue
+        elif source == "youtube" and not artist_matches:
+            continue
+
+        score = 100 + (100 if artist_matches else 0)
+        if duration_difference is not None:
+            score += max(0, 30 - duration_difference)
+        if score > best_score:
+            best_match = record
+            best_score = score
+
+    return best_match
+
+
 @app.get("/lyrics")
-async def lyrics(title: str = Query(...), artist: str = Query(...)):
+async def lyrics(
+    title: str = Query(...),
+    artist: str = Query(...),
+    album: str | None = Query(None),
+    duration: float | None = Query(None, ge=1, le=3600),
+    source: str = Query("spotify"),
+):
     title = title.strip()
     artist = artist.strip()
+    source = source.strip().casefold()
     if not title or not artist:
         raise HTTPException(400, "A song title and artist are required.")
+
+    if source == "youtube":
+        lookup_title, lookup_artist = _youtube_lyrics_pair(title, artist)
+    else:
+        lookup_title, lookup_artist = title, artist
+
+    lookup_params = {
+        "track_name": lookup_title,
+        "artist_name": lookup_artist,
+    }
+    if album and source != "youtube":
+        lookup_params["album_name"] = album.strip()
+    if duration:
+        lookup_params["duration"] = int(round(duration))
+
+    if source == "youtube":
+        search_params = {"q": _clean_youtube_title(title)}
+    else:
+        search_params = {"track_name": lookup_title}
+        search_params["artist_name"] = lookup_artist
+        if album and album.strip():
+            search_params["album_name"] = album.strip()
 
     try:
         async with httpx.AsyncClient(timeout=10) as client:
             response = await client.get(
                 "https://lrclib.net/api/get",
-                params={"track_name": title, "artist_name": artist},
-                headers={"User-Agent": "Wavelength/2.0"},
+                params=lookup_params,
+                headers={"User-Agent": "Wavelength/2.0 (https://github.com/zespook/wavelength-rust)"},
             )
-        if response.status_code == 404:
-            raise HTTPException(404, "No lyrics found.")
-        response.raise_for_status()
-        data = response.json()
+            search_required = response.status_code == 404
+            if not search_required:
+                response.raise_for_status()
+                data = response.json()
+                if not isinstance(data, dict):
+                    raise HTTPException(502, "LRCLIB returned invalid lyrics data.")
+                search_required = not _lyrics_duration_matches(data, duration)
+
+            if search_required:
+                search_response = await client.get(
+                    "https://lrclib.net/api/search",
+                    params=search_params,
+                    headers={"User-Agent": "Wavelength/2.0 (https://github.com/zespook/wavelength-rust)"},
+                )
+                if search_response.status_code == 404:
+                    raise HTTPException(404, "No lyrics found.")
+                search_response.raise_for_status()
+                records = search_response.json()
+                if not isinstance(records, list):
+                    raise HTTPException(502, "LRCLIB returned invalid lyrics data.")
+                data = _find_lyrics_search_match(
+                    records, title, artist, source, duration
+                )
+                if data is None:
+                    raise HTTPException(404, "No lyrics found.")
     except httpx.TimeoutException as error:
         logger.warning("LRCLIB request timed out for %r by %r", title, artist)
         raise HTTPException(504, "Lyrics are temporarily unavailable.") from error

@@ -4,4 +4,5 @@ python-dotenv
 spotipy
 SpotiFLAC>=5.0.6,<6.0.0
 httpx
+imageio-ffmpeg>=0.5.1,<1.0
 yt-dlp

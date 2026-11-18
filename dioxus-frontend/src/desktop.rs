@@ -1053,10 +1053,6 @@ pub async fn choose_download_folder() -> Result<Option<String>, String> {
     ))
 }
 
-pub fn clear_download_folder() -> Result<(), String> {
-    write_setting("downloadDirectory", Value::String(String::new()))
-}
-
 fn selected_download_directory() -> Result<PathBuf, String> {
     let path = settings_string("downloadDirectory")?
         .ok_or_else(|| "Choose a download folder in Settings first.".to_string())?;
@@ -1127,7 +1123,7 @@ fn unique_download_path(directory: &Path, base: &str, extension: &str) -> PathBu
     ))
 }
 
-pub async fn download(id: &str, filename: &str) -> Result<String, String> {
+pub async fn download(id: &str, filename: &str, format: &str) -> Result<String, String> {
     if id.len() < 6
         || id.len() > 256
         || !id
@@ -1136,9 +1132,15 @@ pub async fn download(id: &str, filename: &str) -> Result<String, String> {
     {
         return Err("This track has an invalid download ID.".to_string());
     }
+    if !matches!(format, "flac" | "mp3") {
+        return Err("Choose FLAC or MP3 as the download format in Settings.".to_string());
+    }
     let directory = selected_download_directory()?;
     let base = safe_filename(filename)?;
-    let url = format!("{}/download/{id}?code=solo", audio_service_base()?);
+    let url = format!(
+        "{}/download/{id}?code=solo&format={format}",
+        audio_service_base()?
+    );
     let response = reqwest::get(url)
         .await
         .map_err(|error| format!("Audio service request failed: {error}"))?;
@@ -1148,13 +1150,19 @@ pub async fn download(id: &str, filename: &str) -> Result<String, String> {
             response.status()
         ));
     }
-    let extension = audio_extension(
+    let response_extension = audio_extension(
         response
             .headers()
             .get(reqwest::header::CONTENT_TYPE)
             .and_then(|value| value.to_str().ok())
             .unwrap_or(""),
     );
+    if response_extension != format {
+        return Err(format!(
+            "Audio service returned {response_extension} instead of the requested {format} format."
+        ));
+    }
+    let extension = format;
     let destination = unique_download_path(&directory, &base, extension);
     let temporary = destination.with_extension(format!("{extension}.{}.part", std::process::id()));
     let bytes = response
@@ -1295,6 +1303,11 @@ fn scan_root(root: &Path) -> Result<Vec<Track>, String> {
                     source: Some("local".to_string()),
                     folder_path: Some(folder_path),
                     audio_id: None,
+                    modified_at: metadata
+                        .modified()
+                        .ok()
+                        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map(|duration| duration.as_millis() as u64),
                 });
             }
         }
@@ -2197,10 +2210,7 @@ mod tests {
 
         let (system_install, archive) = parse_service_install_arguments(&arguments).unwrap();
         assert!(system_install);
-        assert_eq!(
-            archive,
-            Some(PathBuf::from(r"C:\packages\services.zip"))
-        );
+        assert_eq!(archive, Some(PathBuf::from(r"C:\packages\services.zip")));
     }
 
     #[test]

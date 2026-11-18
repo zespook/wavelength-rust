@@ -1,7 +1,36 @@
 !include "LogicLib.nsh"
 
 Function .onInit
-    ExecWait '"$SYSDIR\taskkill.exe" /IM wavelength.exe' $0
+    FindWindow $R0 "" "Wavelength"
+    ${If} $R0 != 0
+        MessageBox MB_YESNO|MB_ICONEXCLAMATION "Wavelength is open. If you choose Yes, it will be closed forcefully before installation. Choose No if you have already closed it yourself." IDYES closeWavelengthAutomatically
+
+    confirmWavelengthClosed:
+        FindWindow $R0 "" "Wavelength"
+        ${If} $R0 != 0
+            MessageBox MB_OKCANCEL|MB_ICONEXCLAMATION "Wavelength is still open. Close it and select OK to continue, or select Cancel to exit setup." IDOK confirmWavelengthClosed IDCANCEL cancelInstallation
+        ${EndIf}
+        Goto stopLocalService
+
+    closeWavelengthAutomatically:
+        nsExec::ExecToLog '"$SYSDIR\taskkill.exe" /IM wavelength.exe /T /F'
+        Pop $R1
+        Sleep 750
+        FindWindow $R0 "" "Wavelength"
+        ${If} $R0 != 0
+            MessageBox MB_ICONSTOP|MB_OK "Wavelength could not be closed. Close it manually and run setup again."
+            Abort
+        ${EndIf}
+
+    stopLocalService:
+    ${EndIf}
+    nsExec::ExecToLog '"$SYSDIR\taskkill.exe" /IM WavelengthLocalService.exe /T /F'
+    Pop $R1
+    Sleep 750
+    Return
+
+    cancelInstallation:
+        Abort
 FunctionEnd
 
 Section -InstallWavelengthServices
@@ -11,28 +40,21 @@ Section -InstallWavelengthServices
     IntOp $R4 $R1 >> 16
     StrCpy $R5 "$R2.$R3.$R4"
 
-    IfFileExists "$EXEDIR\Wavelength_$R5_services_windows-x86_64.zip" installVersionedLocalServices checkGenericLocalServices
-
-checkGenericLocalServices:
-    IfFileExists "$EXEDIR\Wavelength_services_windows-x86_64.zip" installGenericLocalServices downloadServices
-
-installVersionedLocalServices:
     StrCpy $R6 "$EXEDIR\Wavelength_$R5_services_windows-x86_64.zip"
-    Goto installLocalServices
-
-installGenericLocalServices:
-    StrCpy $R6 "$EXEDIR\Wavelength_services_windows-x86_64.zip"
+    IfFileExists "$R6" installLocalServices downloadServices
 
 installLocalServices:
     DetailPrint "Installing Wavelength local services from the package beside the installer..."
     ExecWait '"$INSTDIR\wavelength.exe" --install-services --archive "$R6"' $0
     Goto servicesInstalled
+
 downloadServices:
-    DetailPrint "Downloading and installing Wavelength local services..."
+    DetailPrint "Downloading Wavelength local services from the matching GitHub release..."
     ExecWait '"$INSTDIR\wavelength.exe" --install-services' $0
+
 servicesInstalled:
     ${If} $0 != 0
-        MessageBox MB_ICONSTOP|MB_OK "Wavelength could not install or verify its local services. Check the service package and your internet connection, then try the installer again."
+        MessageBox MB_ICONSTOP|MB_OK "Wavelength could not install or verify its local services. Place the matching services ZIP beside the installer or check your internet connection, then retry."
         Abort
     ${EndIf}
 SectionEnd

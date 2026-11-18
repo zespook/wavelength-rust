@@ -13,7 +13,6 @@ mod librarypage;
 mod now_playing;
 mod playlist_detail;
 mod playlistspage;
-mod queuepage;
 mod searchpage;
 mod settingspage;
 mod spotify_library;
@@ -29,7 +28,6 @@ use self::librarypage::LibraryPage;
 use self::now_playing::NowPlayingPage;
 use self::playlist_detail::PlaylistDetailPage;
 use self::playlistspage::PlaylistsPage;
-use self::queuepage::QueuePage;
 use self::searchpage::SearchPage;
 use self::settingspage::SettingsPage;
 use self::spotify_library::SpotifyLibraryPage;
@@ -93,7 +91,7 @@ pub(super) fn PageContent() -> Element {
     let spotify_playlist_create_busy = state.spotify_playlist_create_busy;
     let mut spotify_playlist_save_busy = state.spotify_playlist_save_busy;
     let spotify_playlists_busy = state.spotify_playlists_busy;
-    let mut spotify_playlists_page_loaded = state.spotify_playlists_page_loaded;
+    let mut spotify_collections_page_loaded = state.spotify_collections_page_loaded;
     let spotify_playlist_tracks_busy = state.spotify_playlist_tracks_busy;
     let mut queue = state.queue;
     let mut dragging_queue_item = state.dragging_queue_item;
@@ -204,6 +202,7 @@ pub(super) fn PageContent() -> Element {
     let favorite_playlist = favorite_playlist_selected.then(|| Playlist {
         id: "favorite-songs".to_string(),
         name: "Favorite Songs".to_string(),
+        thumbnail: None,
         tracks: favorites(),
     });
     let playlist_detail = favorite_playlist
@@ -224,23 +223,26 @@ pub(super) fn PageContent() -> Element {
         .as_ref()
         .map(|playlist| playlist.tracks.clone())
         .unwrap_or_default();
-    let album_detail_tracks = album_detail_name
-        .as_ref()
-        .and_then(|name| {
-            group_local_tracks(local_tracks(), "album")
-                .into_iter()
-                .find(|(group_name, _)| group_name == name)
-                .map(|(_, tracks)| tracks)
-        })
-        .unwrap_or_default();
+    let album_detail_tracks = if (state.spotify_album_selected)().is_some() {
+        (state.spotify_album_tracks)()
+    } else {
+        album_detail_name
+            .as_ref()
+            .and_then(|name| {
+                group_local_tracks(local_tracks(), "album")
+                    .into_iter()
+                    .find(|(group_name, _)| group_name == name)
+                    .map(|(_, tracks)| tracks)
+            })
+            .unwrap_or_default()
+    };
     let favorite_playlist_id = "favorite-songs".to_string();
     let page_tracks = match page() {
         Page::Search => results(),
         Page::Library => local_tracks(),
         Page::SpotifyLibrary => spotify_tracks(),
-        Page::SpotifyPlaylists => spotify_playlist_tracks(),
+        Page::SpotifyPlaylists | Page::SpotifyPlaylistDetail => spotify_playlist_tracks(),
         Page::PlaylistDetail => playlist_tracks.clone(),
-        Page::Queue => queue(),
         Page::History => history(),
         _ => Vec::new(),
     };
@@ -280,12 +282,14 @@ pub(super) fn PageContent() -> Element {
     });
     let home_featured_track = local_tracks().first().cloned();
     let recently_added = local_tracks().into_iter().take(9).collect::<Vec<_>>();
-    let home_playlists = playlists()
+    let mut home_playlists = playlists()
         .into_iter()
         .filter(|playlist| !playlist.tracks.is_empty())
-        .take(8)
         .collect::<Vec<_>>();
-    let home_albums = group_local_tracks(local_tracks(), "album");
+    sort_track_collections(&mut home_playlists, |playlist| &playlist.tracks);
+    home_playlists.truncate(8);
+    let mut home_albums = group_local_tracks(local_tracks(), "album");
+    sort_track_collections(&mut home_albums, |(_, tracks)| tracks);
     let (artist_stats, song_stats) =
         home_statistics(&history(), &play_events(), &play_counts(), &stats_period());
     let background_color_value = if background_color().is_empty() {
@@ -412,8 +416,7 @@ pub(super) fn PageContent() -> Element {
                             Page::PlaylistDetail => rsx! { PlaylistDetailPage { data: data.clone() } },
                             Page::AlbumDetail => rsx! { AlbumDetailPage { data: data.clone() } },
                             Page::SpotifyLibrary => rsx! { SpotifyLibraryPage { data: data.clone() } },
-                            Page::SpotifyPlaylists => rsx! { SpotifyPlaylistsPage { data: data.clone() } },
-                            Page::Queue => rsx! { QueuePage { data: data.clone() } },
+                            Page::SpotifyPlaylists | Page::SpotifyPlaylistDetail => rsx! { SpotifyPlaylistsPage { data: data.clone() } },
                             Page::History => rsx! { HistoryPage { data: data.clone() } },
                             Page::Settings => rsx! { SettingsPage { data: data.clone() } },
                             Page::Activity => rsx! { ActivityPage { data: data.clone() } },

@@ -27,9 +27,9 @@ try {
     $env:WAVELENGTH_SERVICES_SHA256 = $hashLine.Substring(7).ToLowerInvariant()
     Remove-Item Env:\WAVELENGTH_SERVICES_ARCHIVE -ErrorAction SilentlyContinue
     New-Item -ItemType Directory -Force -Path $BundleDir | Out-Null
+    Copy-Item $serviceArchive (Join-Path $BundleDir "Wavelength_${version}_services_windows-x86_64.zip") -Force
     & $Dioxus bundle --platform desktop --release --no-default-features --features desktop --package-types nsis --out-dir $BundleDir
     if ($LASTEXITCODE -ne 0) { throw 'Could not build the Windows installer.' }
-    Copy-Item $serviceArchive (Join-Path $BundleDir 'Wavelength_services_windows-x86_64.zip') -Force
   } else {
     & $Dioxus serve --platform desktop --no-default-features --features desktop
   }

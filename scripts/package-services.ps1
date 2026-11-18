@@ -52,6 +52,7 @@ $ServiceArgs = @(
     '--collect-all', 'spotipy',
     '--collect-all', 'SpotiFLAC',
     '--collect-all', 'yt_dlp',
+    '--collect-all', 'imageio_ffmpeg',
     '--collect-all', 'packaging',
     '--collect-all', 'mutagen',
     '--collect-all', 'certifi',

@@ -63,6 +63,9 @@ tokio = { version = "1", features = ["macros", "process", "rt-multi-thread", "ti
 url = { version = "2", optional = true }
 zip = { version = "2", optional = true }
 
+[target.'cfg(target_os = "windows")'.dependencies]
+keyring = { version = "3", features = ["windows-native"], optional = true }
+
 [profile.dev]
 debug = 0
 

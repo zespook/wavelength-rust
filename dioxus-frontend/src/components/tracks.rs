@@ -60,21 +60,31 @@ pub(crate) fn TrackList(
     context_track: Signal<Option<TrackContextMenu>>,
     #[props(default)] context_menu_only: bool,
     #[props(default)] history_actions: bool,
+    #[props(default)] download_statuses: Option<std::collections::HashMap<String, DownloadStatus>>,
+    #[props(default)] on_download: EventHandler<Track>,
 ) -> Element {
     rsx! {
         div { class: "track-table",
             for (index, track) in tracks.iter().cloned().enumerate() {
-                TrackRow {
-                    favorite_active: history_actions && favorites().iter().any(|favorite| favorite.key() == track.key()),
-                    key: "{track.key()}-{index}",
-                    track,
-                    context_menu_only,
-                    history_actions,
-                    on_play: move |track| play_track(track, current, audio_src, playing, queue, history, notice),
-                    on_queue: move |track| add_to_queue(track, queue, notice),
-                    on_favorite: move |track| toggle_favorite(track, favorites, notice),
-                    on_download: move |_| {},
-                    on_context: move |menu| context_track.set(Some(menu)),
+                {
+                    let download_status = download_statuses
+                        .as_ref()
+                        .and_then(|statuses| statuses.get(&track.audio_service_id()).cloned());
+                    rsx! {
+                        TrackRow {
+                            favorite_active: history_actions && favorites().iter().any(|favorite| favorite.key() == track.key()),
+                            key: "{track.key()}-{index}",
+                            track,
+                            download_status,
+                            context_menu_only,
+                            history_actions,
+                            on_play: move |track| play_track(track, current, audio_src, playing, queue, history, notice),
+                            on_queue: move |track| add_to_queue(track, queue, notice),
+                            on_favorite: move |track| toggle_favorite(track, favorites, notice),
+                            on_download: move |track| on_download.call(track),
+                            on_context: move |menu| context_track.set(Some(menu)),
+                        }
+                    }
                 }
             }
         }
@@ -98,7 +108,9 @@ pub(crate) fn TrackRow(
     on_context: EventHandler<TrackContextMenu>,
 ) -> Element {
     let title = track.title.clone();
-    let artist = track.artist.clone();
+    let artist = track.artist.trim();
+    let artist = (!artist.is_empty() && !artist.eq_ignore_ascii_case("unknown artist"))
+        .then(|| artist.to_string());
     let length = track.duration_label();
     let play_track = track.clone();
     let select_track = track.clone();
@@ -176,7 +188,9 @@ pub(crate) fn TrackRow(
                     }
                     span { class: "track-copy",
                         strong { "{title}" }
-                        small { "{artist}" }
+                        if let Some(artist) = artist {
+                            small { "{artist}" }
+                        }
                     }
                 }
                 span { class: "album-name", "{track.album.as_deref().unwrap_or(\"Single\")}" }

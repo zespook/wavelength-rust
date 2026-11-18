@@ -22,6 +22,7 @@ coverage.xml
 **/*spec*
 !dioxus-frontend/spec/
 !dioxus-frontend/spec/browser-room-request.spec.js
+!audio-service/test_lyrics.py
 
 # Markdown docs except README files
 *.md

@@ -483,6 +483,7 @@
   .content-inner.page-equalizer .equalizer-toolbar-actions .compact-action {
     min-height: 36px;
     padding-inline: 8px;
+    align-self: center;
   }
 
   .content-inner.page-equalizer .equalizer-spectrum-canvas {

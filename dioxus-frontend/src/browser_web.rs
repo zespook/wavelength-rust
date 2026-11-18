@@ -45,14 +45,16 @@ extern "C" {
     async fn spotify_library_js() -> Result<JsValue, JsValue>;
     #[wasm_bindgen(catch, js_name = spotifyPlaylists)]
     async fn spotify_playlists_js() -> Result<JsValue, JsValue>;
+    #[wasm_bindgen(catch, js_name = spotifyAlbums)]
+    async fn spotify_albums_js() -> Result<JsValue, JsValue>;
     #[wasm_bindgen(catch, js_name = spotifyPlaylistTracks)]
     async fn spotify_playlist_tracks_js(id: &str) -> Result<JsValue, JsValue>;
+    #[wasm_bindgen(catch, js_name = spotifyAlbumTracks)]
+    async fn spotify_album_tracks_js(album: JsValue) -> Result<JsValue, JsValue>;
     #[wasm_bindgen(catch, js_name = saveSpotifyPlaylist)]
-    async fn save_spotify_playlist_js(
-        id: &str,
-        name: &str,
-        track_uris: JsValue,
-    ) -> Result<JsValue, JsValue>;
+    async fn save_spotify_playlist_js(id: &str, track_uris: JsValue) -> Result<JsValue, JsValue>;
+    #[wasm_bindgen(catch, js_name = renameSpotifyPlaylist)]
+    async fn rename_spotify_playlist_js(id: &str, name: &str) -> Result<JsValue, JsValue>;
     #[wasm_bindgen(catch, js_name = createSpotifyPlaylist)]
     async fn create_spotify_playlist_js(name: &str) -> Result<JsValue, JsValue>;
     #[wasm_bindgen(catch, js_name = disconnectSpotify)]
@@ -72,13 +74,13 @@ extern "C" {
     #[wasm_bindgen(catch, js_name = setAudioVolume)]
     fn set_audio_volume_js(value: f64) -> Result<bool, JsValue>;
     #[wasm_bindgen(catch, js_name = downloadAudio)]
-    async fn download_audio_js(id: &str, filename: &str) -> Result<JsValue, JsValue>;
+    async fn download_audio_js(id: &str, filename: &str, format: &str) -> Result<JsValue, JsValue>;
+    #[wasm_bindgen(catch, js_name = preloadAudio)]
+    async fn preload_audio_js(track_ids: JsValue, scope: &str) -> Result<bool, JsValue>;
     #[wasm_bindgen(catch, js_name = savedDownloadFolderName)]
     async fn saved_download_folder_name_js() -> Result<JsValue, JsValue>;
     #[wasm_bindgen(catch, js_name = chooseDownloadFolder)]
     async fn choose_download_folder_js() -> Result<JsValue, JsValue>;
-    #[wasm_bindgen(catch, js_name = clearDownloadFolder)]
-    async fn clear_download_folder_js() -> Result<JsValue, JsValue>;
     #[wasm_bindgen(catch, js_name = scanLibrary)]
     async fn scan_library_js() -> Result<JsValue, JsValue>;
     #[wasm_bindgen(catch, js_name = savedLibraryFolders)]
@@ -109,7 +111,17 @@ extern "C" {
         body: &str,
     ) -> Result<JsValue, JsValue>;
     #[wasm_bindgen(catch, js_name = fetchLyrics)]
-    async fn fetch_lyrics_js(title: &str, artist: &str) -> Result<JsValue, JsValue>;
+    async fn fetch_lyrics_js(
+        title: &str,
+        artist: &str,
+        album: &str,
+        duration: f64,
+        source: &str,
+    ) -> Result<JsValue, JsValue>;
+    #[wasm_bindgen(catch, js_name = scrollActiveLyricIntoView)]
+    fn scroll_active_lyric_into_view_js(index: u32, track_key: &str) -> Result<bool, JsValue>;
+    #[wasm_bindgen(catch, js_name = scrollContentToTop)]
+    fn scroll_content_to_top_js() -> Result<(), JsValue>;
     #[wasm_bindgen(catch, js_name = connectRoomSocket)]
     fn connect_room_socket_js(
         url: &str,
@@ -301,18 +313,32 @@ pub async fn spotify_playlists() -> Result<Vec<SpotifyPlaylist>, String> {
     serde_wasm_bindgen::from_value(value).map_err(|error| error.to_string())
 }
 
+pub async fn spotify_albums() -> Result<Vec<SpotifyAlbum>, String> {
+    let value = spotify_albums_js().await.map_err(error)?;
+    serde_wasm_bindgen::from_value(value).map_err(|error| error.to_string())
+}
+
 pub async fn spotify_playlist_tracks(id: &str) -> Result<Vec<Track>, String> {
     let value = spotify_playlist_tracks_js(id).await.map_err(error)?;
     serde_wasm_bindgen::from_value(value).map_err(|error| error.to_string())
 }
 
-pub async fn save_spotify_playlist(
-    id: &str,
-    name: &str,
-    track_uris: &[String],
-) -> Result<(), String> {
+pub async fn spotify_album_tracks(album: &SpotifyAlbum) -> Result<Vec<Track>, String> {
+    let album = serde_wasm_bindgen::to_value(album).map_err(|error| error.to_string())?;
+    let value = spotify_album_tracks_js(album).await.map_err(error)?;
+    serde_wasm_bindgen::from_value(value).map_err(|error| error.to_string())
+}
+
+pub async fn save_spotify_playlist(id: &str, track_uris: &[String]) -> Result<(), String> {
     let track_uris = serde_wasm_bindgen::to_value(track_uris).map_err(|error| error.to_string())?;
-    save_spotify_playlist_js(id, name, track_uris)
+    save_spotify_playlist_js(id, track_uris)
+        .await
+        .map(|_| ())
+        .map_err(error)
+}
+
+pub async fn rename_spotify_playlist(id: &str, name: &str) -> Result<(), String> {
+    rename_spotify_playlist_js(id, name)
         .await
         .map(|_| ())
         .map_err(error)
@@ -356,12 +382,20 @@ pub fn set_volume(value: f64) -> Result<(), String> {
     set_audio_volume_js(value).map(|_| ()).map_err(error)
 }
 
-pub async fn download(id: &str, filename: &str) -> Result<String, String> {
-    download_audio_js(id, filename)
+pub async fn download(id: &str, filename: &str, format: &str) -> Result<String, String> {
+    download_audio_js(id, filename, format)
         .await
         .map_err(error)?
         .as_string()
         .ok_or_else(|| "Download did not return a filename.".to_string())
+}
+
+pub async fn preload_audio(track_ids: &[String], scope: &str) -> Result<(), String> {
+    let track_ids = serde_wasm_bindgen::to_value(track_ids).map_err(|error| error.to_string())?;
+    preload_audio_js(track_ids, scope)
+        .await
+        .map(|_| ())
+        .map_err(error)
 }
 
 pub async fn saved_download_folder_name() -> Result<Option<String>, String> {
@@ -384,10 +418,6 @@ pub async fn choose_download_folder() -> Result<Option<String>, String> {
         .as_string()
         .map(Some)
         .ok_or_else(|| "Selected download folder did not return a folder name.".to_string())
-}
-
-pub async fn clear_download_folder() -> Result<(), String> {
-    clear_download_folder_js().await.map(|_| ()).map_err(error)
 }
 
 pub async fn scan_library() -> Result<Vec<Track>, String> {
@@ -481,14 +511,32 @@ pub async fn request_json_method<T: for<'de> Deserialize<'de>>(
     serde_wasm_bindgen::from_value(value).map_err(|error| error.to_string())
 }
 
-pub async fn lyrics(title: &str, artist: &str) -> Result<Option<LyricsResponse>, String> {
-    let value = fetch_lyrics_js(title, artist).await.map_err(error)?;
+pub async fn lyrics(
+    title: &str,
+    artist: &str,
+    album: &str,
+    duration: f64,
+    source: &str,
+) -> Result<Option<LyricsResponse>, String> {
+    let value = fetch_lyrics_js(title, artist, album, duration, source)
+        .await
+        .map_err(error)?;
     if value.is_null() || value.is_undefined() {
         return Ok(None);
     }
     serde_wasm_bindgen::from_value(value)
         .map(Some)
         .map_err(|error| error.to_string())
+}
+
+pub async fn scroll_active_lyric_into_view(index: u32, track_key: &str) -> Result<(), String> {
+    scroll_active_lyric_into_view_js(index, track_key)
+        .map(|_| ())
+        .map_err(error)
+}
+
+pub async fn scroll_content_to_top() -> Result<(), String> {
+    scroll_content_to_top_js().map_err(error)
 }
 
 pub fn connect_room_socket(
@@ -502,9 +550,17 @@ pub fn connect_room_socket(
 ) -> Result<(), String> {
     let permissions =
         serde_wasm_bindgen::to_value(permissions).map_err(|error| error.to_string())?;
-    connect_room_socket_js(url, code, username, access_token, host_token, role, permissions)
-        .map(|_| ())
-        .map_err(error)
+    connect_room_socket_js(
+        url,
+        code,
+        username,
+        access_token,
+        host_token,
+        role,
+        permissions,
+    )
+    .map(|_| ())
+    .map_err(error)
 }
 
 pub fn disconnect_room_socket() -> Result<(), String> {

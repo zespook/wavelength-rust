@@ -9,23 +9,49 @@ pub(crate) fn CollectionDetailHeader(
     tracks: Vec<Track>,
     track_count: usize,
     artist: Option<String>,
+    artwork_url: Option<String>,
     artwork_class: String,
-    back_label: String,
+    artwork_icon: Option<&'static str>,
     play_label: String,
     extra_action_label: Option<String>,
-    on_back: EventHandler<()>,
+    extra_action_disabled: bool,
+    rename_enabled: bool,
+    rename_editing: bool,
+    rename_value: String,
+    rename_busy: bool,
+    rename_notice: Option<String>,
+    save_action_label: Option<String>,
+    save_action_disabled: bool,
+    download_action_label: Option<String>,
+    download_action_disabled: bool,
     on_play: EventHandler<()>,
     on_extra_action: EventHandler<()>,
+    on_download_action: EventHandler<()>,
+    on_rename_start: EventHandler<()>,
+    on_rename_change: EventHandler<String>,
+    on_rename_save: EventHandler<()>,
+    on_rename_cancel: EventHandler<()>,
+    on_save_action: EventHandler<()>,
 ) -> Element {
-    let artwork = tracks.iter().find_map(|track| {
-        track
-            .thumbnail
-            .as_deref()
-            .filter(|url| !url.trim().is_empty())
-    });
-    let artist = artist.or_else(|| collection_artist(&tracks));
+    let artwork = artwork_url
+        .as_deref()
+        .filter(|url| !url.trim().is_empty())
+        .or_else(|| {
+            tracks.iter().find_map(|track| {
+                track
+                    .thumbnail
+                    .as_deref()
+                    .filter(|url| !url.trim().is_empty())
+            })
+        });
+    let artist = artist
+        .filter(|artist| {
+            let artist = artist.trim();
+            !artist.is_empty() && !artist.eq_ignore_ascii_case("unknown artist")
+        })
+        .or_else(|| collection_artist(&tracks));
     let duration = collection_total_time(&tracks);
-    let fallback_icon = if kind == "Playlist" { "list" } else { "disc" };
+    let fallback_icon = artwork_icon.unwrap_or(if kind == "Playlist" { "list" } else { "disc" });
     let artwork_alt = format!("Artwork for {title}");
     let track_count_label = format!(
         "{} {}",
@@ -33,14 +59,10 @@ pub(crate) fn CollectionDetailHeader(
         if track_count == 1 { "track" } else { "tracks" }
     );
     let no_tracks = tracks.is_empty();
+    let playlist_kind = matches!(kind.as_str(), "Playlist" | "Spotify playlist" | "Favorites");
 
     rsx! {
         section { class: "collection-detail-hero",
-            button {
-                class: "outline-button compact-action collection-detail-back",
-                onclick: move |_| on_back.call(()),
-                "{back_label}"
-            }
             div { class: "collection-detail-main",
                 div { class: "collection-detail-cover {artwork_class}",
                     if let Some(image) = artwork {
@@ -52,8 +74,58 @@ pub(crate) fn CollectionDetailHeader(
                     }
                 }
                 div { class: "collection-detail-copy",
-                    p { class: "collection-detail-type", "{kind}" }
-                    h1 { "{title}" }
+                    if !playlist_kind {
+                        p { class: "collection-detail-type", "{kind}" }
+                    }
+                    div { class: "collection-detail-title-row",
+                        if rename_enabled && rename_editing {
+                            form {
+                                class: "collection-detail-title-edit",
+                                onsubmit: move |event| {
+                                    event.prevent_default();
+                                    on_rename_save.call(());
+                                },
+                                input {
+                                    value: "{rename_value}",
+                                    maxlength: "100",
+                                    aria_label: "Playlist name",
+                                    autofocus: true,
+                                    disabled: rename_busy,
+                                    oninput: move |event| on_rename_change.call(event.value())
+                                }
+                                button {
+                                    class: "text-button",
+                                    r#type: "submit",
+                                    disabled: rename_busy || rename_value.trim().is_empty(),
+                                    "Save"
+                                }
+                                button {
+                                    class: "text-button",
+                                    r#type: "button",
+                                    disabled: rename_busy,
+                                    onclick: move |_| on_rename_cancel.call(()),
+                                    "Cancel"
+                                }
+                            }
+                        } else {
+                            h1 { class: "collection-detail-title", "{title}" }
+                            if rename_enabled {
+                                button {
+                                    class: "collection-detail-title-edit-button",
+                                    aria_label: "Edit playlist name",
+                                    title: "Edit playlist name",
+                                    disabled: rename_busy,
+                                    onclick: move |_| on_rename_start.call(()),
+                                    Icon { name: "pencil" }
+                                }
+                            }
+                        }
+                    }
+                    if rename_enabled && rename_editing {
+                        if let Some(notice) = rename_notice {
+                            p { class: "collection-detail-rename-notice", "{notice}" }
+                        }
+                    }
                     if let Some(artist) = artist {
                         p { class: "collection-detail-artist", "{artist}" }
                     }
@@ -63,20 +135,43 @@ pub(crate) fn CollectionDetailHeader(
                             span { class: "collection-detail-meta-separator", "·" }
                             span { "Total time {duration}" }
                         }
+                        if playlist_kind {
+                            span { class: "collection-detail-meta-separator", "·" }
+                            span { class: "collection-detail-meta-type", "{kind}" }
+                        }
                     }
                     div { class: "collection-detail-actions",
                         button {
-                            class: "solid-button collection-detail-play",
+                            class: "icon-button collection-detail-play collection-detail-play-icon",
                             disabled: no_tracks,
                             aria_label: "{play_label}",
+                            title: "{play_label}",
                             onclick: move |_| on_play.call(()),
                             Icon { name: "play" }
-                            "{play_label}"
                         }
                         if let Some(label) = extra_action_label {
                             button {
                                 class: "outline-button compact-action",
+                                disabled: extra_action_disabled,
                                 onclick: move |_| on_extra_action.call(()),
+                                "{label}"
+                            }
+                        }
+                        if let Some(label) = download_action_label {
+                            button {
+                                class: "outline-button compact-action",
+                                disabled: download_action_disabled,
+                                aria_label: "Download playlist tracks",
+                                onclick: move |_| on_download_action.call(()),
+                                Icon { name: "download" }
+                                "{label}"
+                            }
+                        }
+                        if let Some(label) = save_action_label {
+                            button {
+                                class: "outline-button compact-action",
+                                disabled: save_action_disabled,
+                                onclick: move |_| on_save_action.call(()),
                                 "{label}"
                             }
                         }
@@ -91,7 +186,7 @@ fn collection_artist(tracks: &[Track]) -> Option<String> {
     let mut artists = tracks
         .iter()
         .map(|track| track.artist.trim())
-        .filter(|artist| !artist.is_empty());
+        .filter(|artist| !artist.is_empty() && !artist.eq_ignore_ascii_case("unknown artist"));
     let first = artists.next()?;
 
     Some(if artists.all(|artist| artist == first) {
@@ -181,5 +276,15 @@ mod tests {
         ];
 
         assert_eq!(collection_total_time(&tracks), None);
+    }
+
+    #[test]
+    fn collection_artist_ignores_placeholder_artist_names() {
+        let tracks = vec![Track {
+            artist: "Unknown artist".to_string(),
+            ..Track::default()
+        }];
+
+        assert_eq!(collection_artist(&tracks), None);
     }
 }

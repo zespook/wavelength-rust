@@ -333,6 +333,22 @@ function spotifyThumbnail(album) {
     return area > bestArea || (area === bestArea && candidate.index < best.index) ? candidate : best;
   }).image.url;
 }
+function spotifyTrack(item, albumOverride = null) {
+  const track = item?.item || item?.track || item;
+  if (!track?.id || (track.type && track.type !== "track")) return null;
+  const album = albumOverride || track.album;
+  return {
+    id: track.id,
+    title: track.name || "Untitled track",
+    artist: track.artists?.map(artist => artist.name).filter(Boolean).join(", ")
+      || album?.artist
+      || "Unknown artist",
+    album: album?.name || "",
+    thumbnail: album?.thumbnail || spotifyThumbnail(track.album),
+    duration: Number(track.duration_ms) / 1000 || 0,
+    source: "spotify"
+  };
+}
 let railResizeCleanup = null;
 export function startRailResize() {
   railResizeCleanup?.();
@@ -356,14 +372,29 @@ export function startRailResize() {
   window.addEventListener("pointercancel", stop);
   return true;
 }
+function isSpotifyMediaLink(value) {
+  const query = String(value).trim();
+  return /^spotify:(?:track|album|playlist):[a-z0-9]+$/i.test(query)
+    || /^https?:\/\/open\.spotify\.com\/(?:intl-[a-z]{2}(?:-[a-z]{2})?\/)?(?:track|album|playlist)\/[a-z0-9]+(?:[?#].*)?$/i.test(query);
+}
+async function searchAudioService(query, source) {
+  const url = new URL(`${globalThis.__WAVELENGTH_AUDIO_SERVICE__ || "http://127.0.0.1:8787"}/search`);
+  url.search = new URLSearchParams({ q: query, source, limit: "50", offset: "0" });
+  const response = await fetch(url);
+  const data = await response.json().catch(() => { throw new Error("Audio search returned invalid JSON."); });
+  if (!response.ok) throw new Error(data.detail || data.error || "Audio search failed.");
+  return data.results || [];
+}
 export async function searchAudio(query, source) {
-  if (source === "spotify" && localStorage.getItem("wavelength-spotify-refresh-token")) {
+  if (source === "spotify" && isSpotifyMediaLink(query)) {
+    return searchAudioService(query, source);
+  }
+  if (source === "spotify" && (spotifyRefreshToken || localStorage.getItem("wavelength-spotify-refresh-token"))) {
     const url = new URL("https://api.spotify.com/v1/search");
-    url.search = new URLSearchParams({ q: query, type: "track", limit: "50" });
-    const response = await fetch(url, {
+    url.search = new URLSearchParams({ q: query, type: "track", limit: "10" });
+    const data = await spotifyRequest(url, {
       headers: { Authorization: `Bearer ${await getSpotifyAccessToken()}` }
-    });
-    const data = await spotifyResponse(response, "Spotify search failed.");
+    }, "Spotify search failed.");
     return (data.tracks?.items || []).map(item => ({
       id: item.id,
       title: item.name,
@@ -374,35 +405,60 @@ export async function searchAudio(query, source) {
       source: "spotify"
     }));
   }
-  const url = new URL(`${globalThis.__WAVELENGTH_AUDIO_SERVICE__ || "http://127.0.0.1:8787"}/search`);
-  url.search = new URLSearchParams({ q: query, source, limit: "50", offset: "0" });
-  const response = await fetch(url);
-  const data = await response.json().catch(() => { throw new Error("Audio search returned invalid JSON."); });
-  if (!response.ok) throw new Error(data.detail || data.error || "Audio search failed.");
-  return data.results || [];
+  if (source === "spotify") {
+    throw new Error("Connect Spotify to search by text. Enter a Spotify track, album, or playlist link to play it.");
+  }
+  if (source === "youtube") return searchAudioService(query, source);
+  throw new Error("Unsupported search source.");
 }
 const spotifyClientId = "6e2ca58467e84ea5bf33b328d553c1b9";
 let spotifyAccessToken = "";
 let spotifyAccessTokenExpiresAt = 0;
 let spotifyRefreshToken = "";
-async function spotifyResponse(response, fallback) {
-  if (response.status === 204) return {};
-  let data;
+async function spotifyRequest(url, options = {}, fallback = "Spotify request failed.", timeoutMs = 30000) {
+  const controller = new AbortController();
+  const timeoutMessage = "Spotify did not respond in time. Check your connection and try again.";
+  let timeout;
+  const timedOut = new Promise((_, reject) => {
+    timeout = setTimeout(() => {
+      controller.abort();
+      reject(new Error(timeoutMessage));
+    }, timeoutMs);
+  });
+  const request = (async () => {
+    const response = await fetch(url, { ...options, signal: controller.signal });
+    if (response.status === 204) return {};
+    const body = await response.text();
+    let data;
+    if (body) {
+      try {
+        data = JSON.parse(body);
+      } catch {
+        throw new Error(response.ok ? "Spotify returned invalid JSON." : fallback);
+      }
+    } else {
+      data = {};
+    }
+    if (!response.ok) {
+      throw new Error(data.error_description || data.error?.message || data.error || fallback);
+    }
+    return data;
+  })();
   try {
-    data = await response.json();
-  } catch {
-    throw new Error("Spotify returned invalid JSON.");
+    return await Promise.race([request, timedOut]);
+  } catch (error) {
+    if (controller.signal.aborted) {
+      throw new Error(timeoutMessage);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeout);
   }
-  if (!response.ok) {
-    throw new Error(data.error_description || data.error?.message || data.error || fallback);
-  }
-  return data;
 }
 async function spotifyProfile() {
-  const response = await fetch("https://api.spotify.com/v1/me", {
+  return await spotifyRequest("https://api.spotify.com/v1/me", {
     headers: { Authorization: `Bearer ${await getSpotifyAccessToken()}` }
-  });
-  return await spotifyResponse(response, "Could not load the Spotify profile.");
+  }, "Could not load the Spotify profile.");
 }
 async function getSpotifyAccessToken() {
   if (spotifyAccessToken && spotifyAccessTokenExpiresAt > Date.now() + 60000) {
@@ -410,7 +466,7 @@ async function getSpotifyAccessToken() {
   }
   const refreshToken = spotifyRefreshToken || localStorage.getItem("wavelength-spotify-refresh-token");
   if (!refreshToken) throw new Error("Connect Spotify to load your Spotify library.");
-  const response = await fetch("https://accounts.spotify.com/api/token", {
+  const data = await spotifyRequest("https://accounts.spotify.com/api/token", {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams({
@@ -418,8 +474,7 @@ async function getSpotifyAccessToken() {
       refresh_token: refreshToken,
       client_id: spotifyClientId
     })
-  });
-  const data = await spotifyResponse(response, "Spotify token refresh failed.");
+  }, "Spotify token refresh failed.");
   if (typeof data.access_token !== "string") {
     throw new Error("Spotify returned an invalid access token.");
   }
@@ -446,7 +501,7 @@ export async function restoreSpotify() {
       throw new Error("Spotify authorization could not be verified. Please connect again.");
     }
     const redirectUri = `${location.origin}/settings`;
-    const response = await fetch("https://accounts.spotify.com/api/token", {
+    const data = await spotifyRequest("https://accounts.spotify.com/api/token", {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body: new URLSearchParams({
@@ -456,8 +511,7 @@ export async function restoreSpotify() {
         client_id: spotifyClientId,
         code_verifier: verifier
       })
-    });
-    const data = await spotifyResponse(response, "Spotify sign-in could not be completed.");
+    }, "Spotify sign-in could not be completed.");
     if (typeof data.access_token !== "string" || typeof data.refresh_token !== "string") {
       throw new Error("Spotify returned incomplete authorization data.");
     }
@@ -480,22 +534,12 @@ export async function spotifyLibrary() {
   const tracks = [];
   let url = "https://api.spotify.com/v1/me/tracks?limit=50";
   while (url) {
-    const response = await fetch(url, {
+    const data = await spotifyRequest(url, {
       headers: { Authorization: `Bearer ${await getSpotifyAccessToken()}` }
-    });
-    const data = await spotifyResponse(response, "Could not load saved Spotify tracks.");
+    }, "Could not load saved Spotify tracks.");
     for (const item of data.items || []) {
-      const track = item.track;
-      if (!track?.id) continue;
-      tracks.push({
-        id: track.id,
-        title: track.name,
-        artist: track.artists?.map(artist => artist.name).join(", ") || "Unknown artist",
-        album: track.album?.name || "",
-        thumbnail: spotifyThumbnail(track.album),
-        duration: track.duration_ms / 1000,
-        source: "spotify"
-      });
+      const track = spotifyTrack(item);
+      if (track) tracks.push(track);
     }
     url = data.next;
   }
@@ -505,68 +549,117 @@ export async function spotifyPlaylists() {
   const playlists = [];
   let url = "https://api.spotify.com/v1/me/playlists?limit=50";
   while (url) {
-    const response = await fetch(url, {
+    const data = await spotifyRequest(url, {
       headers: { Authorization: `Bearer ${await getSpotifyAccessToken()}` }
-    });
-    const data = await spotifyResponse(response, "Could not load Spotify playlists.");
+    }, "Could not load Spotify playlists.");
     for (const item of data.items || []) {
-      if (item?.id) playlists.push({
-        id: item.id,
-        name: item.name || "Untitled playlist",
-        tracks_total: item.tracks?.total || 0
+      const playlist = item?.item || item;
+      if (!playlist?.id) continue;
+      playlists.push({
+        id: playlist.id,
+        name: playlist.name || "Untitled playlist",
+        tracks_total: playlist.items?.total ?? playlist.tracks?.total ?? 0,
+        thumbnail: spotifyThumbnail(playlist)
       });
     }
     url = data.next;
   }
   return playlists;
 }
+export async function spotifyAlbums() {
+  const albums = [];
+  let url = "https://api.spotify.com/v1/me/albums?limit=50";
+  while (url) {
+    const data = await spotifyRequest(url, {
+      headers: { Authorization: `Bearer ${await getSpotifyAccessToken()}` }
+    }, "Could not load saved Spotify albums.");
+    for (const item of data.items || []) {
+      const album = item?.album || item?.item?.album || item?.item || item;
+      if (!album?.id) continue;
+      albums.push({
+        id: album.id,
+        name: album.name || "Untitled album",
+        artist: album.artists?.map(artist => artist.name).filter(Boolean).join(", ")
+          || "Unknown artist",
+        thumbnail: spotifyThumbnail(album),
+        tracks_total: album.total_tracks ?? album.tracks?.total ?? 0
+      });
+    }
+    url = data.next;
+  }
+  return albums;
+}
 export async function spotifyPlaylistTracks(id) {
   const tracks = [];
-  let url = `https://api.spotify.com/v1/playlists/${encodeURIComponent(id)}/tracks?limit=100`;
+  let url = `https://api.spotify.com/v1/playlists/${encodeURIComponent(id)}/items?limit=100`;
+  const visited = new Set();
+  const deadline = Date.now() + 120000;
   while (url) {
-    const response = await fetch(url, {
-      headers: { Authorization: `Bearer ${await getSpotifyAccessToken()}` }
-    });
-    const data = await spotifyResponse(response, "Could not load tracks in this Spotify playlist.");
+    if (visited.has(url)) throw new Error("Spotify returned a repeated playlist page.");
+    if (visited.size >= 100) throw new Error("This Spotify playlist has too many pages to load.");
+    visited.add(url);
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) throw new Error("Loading this Spotify playlist took too long. Try again.");
+    const token = await getSpotifyAccessToken();
+    const data = await spotifyRequest(url, {
+      headers: { Authorization: `Bearer ${token}` }
+    }, "Could not load tracks in this Spotify playlist.", remaining);
     for (const item of data.items || []) {
-      const track = item.track;
-      if (!track?.id) continue;
-      tracks.push({
-        id: track.id,
-        title: track.name,
-        artist: track.artists?.map(artist => artist.name).join(", ") || "Unknown artist",
-        album: track.album?.name || "",
-        thumbnail: spotifyThumbnail(track.album),
-        duration: track.duration_ms / 1000,
-        source: "spotify"
-      });
+      const track = spotifyTrack(item);
+      if (track) tracks.push(track);
     }
     url = data.next;
   }
   return tracks;
 }
-export async function saveSpotifyPlaylist(id, name, trackUris) {
+export async function spotifyAlbumTracks(album) {
+  if (!album?.id) throw new Error("The Spotify album is unavailable.");
+  const tracks = [];
+  let url = `https://api.spotify.com/v1/albums/${encodeURIComponent(album.id)}/tracks?limit=50`;
+  const visited = new Set();
+  const deadline = Date.now() + 120000;
+  while (url) {
+    if (visited.has(url)) throw new Error("Spotify returned a repeated album page.");
+    if (visited.size >= 100) throw new Error("This Spotify album has too many pages to load.");
+    visited.add(url);
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) throw new Error("Loading this Spotify album took too long. Try again.");
+    const token = await getSpotifyAccessToken();
+    const data = await spotifyRequest(url, {
+      headers: { Authorization: `Bearer ${token}` }
+    }, "Could not load tracks in this Spotify album.", remaining);
+    for (const item of data.items || []) {
+      const track = spotifyTrack(item, album);
+      if (track) tracks.push(track);
+    }
+    url = data.next;
+  }
+  return tracks;
+}
+export async function renameSpotifyPlaylist(id, name) {
+  const updatedName = String(name).trim();
+  if (!updatedName) throw new Error("Enter a playlist name.");
   const token = await getSpotifyAccessToken();
   const headers = { Authorization: `Bearer ${token}`, "Content-Type": "application/json" };
-  if (name) {
-    const renamed = await fetch(`https://api.spotify.com/v1/playlists/${encodeURIComponent(id)}`, {
-      method: "PUT", headers, body: JSON.stringify({ name })
-    });
-    await spotifyResponse(renamed, "Spotify playlist name could not be updated.");
-  }
-  const response = await fetch(`https://api.spotify.com/v1/playlists/${encodeURIComponent(id)}/items`, {
+  await spotifyRequest(`https://api.spotify.com/v1/playlists/${encodeURIComponent(id)}`, {
+    method: "PUT", headers, body: JSON.stringify({ name: updatedName })
+  }, "Spotify playlist name could not be updated.");
+  return true;
+}
+export async function saveSpotifyPlaylist(id, trackUris) {
+  const token = await getSpotifyAccessToken();
+  const headers = { Authorization: `Bearer ${token}`, "Content-Type": "application/json" };
+  await spotifyRequest(`https://api.spotify.com/v1/playlists/${encodeURIComponent(id)}/items`, {
     method: "PUT", headers, body: JSON.stringify({ uris: trackUris })
-  });
-  await spotifyResponse(response, "Spotify playlist could not be updated.");
+  }, "Spotify playlist could not be updated.");
   return true;
 }
 export async function createSpotifyPlaylist(name) {
-  const response = await fetch("https://api.spotify.com/v1/me/playlists", {
+  const data = await spotifyRequest("https://api.spotify.com/v1/me/playlists", {
     method: "POST",
     headers: { Authorization: `Bearer ${await getSpotifyAccessToken()}`, "Content-Type": "application/json" },
     body: JSON.stringify({ name, public: false })
-  });
-  const data = await spotifyResponse(response, "Spotify playlist could not be created.");
+  }, "Spotify playlist could not be created.");
   return { id: data.id, name: data.name || name, tracks_total: 0 };
 }
 export function connectSpotify() {
@@ -647,6 +740,10 @@ export async function playAudioSource(source) {
     });
   }
   try {
+    const equalizerContext = window.__wavelengthEqualizer?.context;
+    if (equalizerContext?.state === "suspended") {
+      await equalizerContext.resume();
+    }
     await audio.play();
   } catch (error) {
     const mediaError = audio.error;
@@ -678,7 +775,10 @@ export function setAudioVolume(value) {
   if (audio) audio.volume = Math.max(0, Math.min(1, value));
   return true;
 }
-export async function downloadAudio(id, filename) {
+export async function downloadAudio(id, filename, format = "flac") {
+  if (format !== "flac" && format !== "mp3") {
+    throw new Error("Choose FLAC or MP3 as the download format in Settings.");
+  }
   const directory = await currentDownloadFolderHandle();
   if (directory) {
     const permission = await directory.requestPermission({ mode: "readwrite" });
@@ -686,19 +786,20 @@ export async function downloadAudio(id, filename) {
       throw new Error(`Write access to "${directory.name}" was not granted. Choose the folder again in Settings.`);
     }
   }
-  const response = await fetch(`${globalThis.__WAVELENGTH_AUDIO_SERVICE__ || "http://127.0.0.1:8787"}/download/${encodeURIComponent(id)}?code=solo`);
+  const url = new URL(`${globalThis.__WAVELENGTH_AUDIO_SERVICE__ || "http://127.0.0.1:8787"}/download/${encodeURIComponent(id)}`);
+  url.search = new URLSearchParams({ code: "solo", format });
+  const response = await fetch(url);
   if (!response.ok) throw new Error(`Download failed (${response.status}).`);
   const blob = await response.blob();
+  const safeFilename = String(filename)
+    .replace(/[<>:"/\\|?*\u0000-\u001f]/g, "_")
+    .replace(/[. ]+$/g, "") || "download";
+  const baseName = safeFilename.replace(/\.(?:flac|mp3|m4a|mp4|ogg|wav|aac|webm|opus)$/i, "");
+  const outputFilename = `${baseName}.${format}`;
   if (directory) {
-    const safeFilename = filename
-      .replace(/[<>:"/\\|?*\u0000-\u001f]/g, "_")
-      .replace(/[. ]+$/g, "") || "download";
-    const extensionIndex = safeFilename.lastIndexOf(".");
-    const baseName = extensionIndex > 0 ? safeFilename.slice(0, extensionIndex) : safeFilename;
-    const extension = extensionIndex > 0 ? safeFilename.slice(extensionIndex) : "";
     let availableFilename = null;
     for (let index = 0; index < 1000; index += 1) {
-      const candidate = index === 0 ? safeFilename : `${baseName} (${index})${extension}`;
+      const candidate = index === 0 ? outputFilename : `${baseName} (${index}).${format}`;
       try {
         await directory.getFileHandle(candidate);
       } catch (error) {
@@ -716,10 +817,33 @@ export async function downloadAudio(id, filename) {
   }
   const link = document.createElement("a");
   link.href = URL.createObjectURL(blob);
-  link.download = filename;
+  link.download = outputFilename;
   link.click();
   URL.revokeObjectURL(link.href);
-  return filename;
+  return outputFilename;
+}
+export async function preloadAudio(trackIds, scope) {
+  const ids = [...new Set(trackIds.filter(id => typeof id === "string" && id.length > 0))];
+  if (!ids.length) return true;
+  const query = new URLSearchParams({
+    video_ids: ids.join(","),
+    scope: scope === "room" ? "room" : "permanent"
+  });
+  const response = await fetch(
+    `${globalThis.__WAVELENGTH_AUDIO_SERVICE__ || "http://127.0.0.1:8787"}/preload?${query}`,
+    { method: "POST" }
+  );
+  if (!response.ok) {
+    let detail;
+    try {
+      const data = await response.json();
+      detail = data.detail || data.error;
+    } catch {
+      detail = null;
+    }
+    throw new Error(detail || `Could not prefetch queued audio (${response.status}).`);
+  }
+  return true;
 }
 const files = new Map(), urls = new Map();
 function supported(name) { return /\.(mp3|flac|m4a|ogg|wav|aac)$/i.test(name); }
@@ -796,19 +920,6 @@ export async function chooseDownloadFolder() {
   downloadFolderLoaded = true;
   return handle.name;
 }
-export async function clearDownloadFolder() {
-  const database = await openFolderDatabase();
-  await new Promise((resolve, reject) => {
-    const request = database
-      .transaction("download-settings", "readwrite")
-      .objectStore("download-settings")
-      .delete("download-folder");
-    request.onsuccess = () => resolve();
-    request.onerror = () => reject(request.error || new Error("Could not reset the download folder."));
-  });
-  downloadFolderHandle = null;
-  downloadFolderLoaded = true;
-}
 async function savedFolders() {
   const database = await openFolderDatabase();
   return await new Promise((resolve, reject) => {
@@ -862,7 +973,17 @@ function track(file, folder) {
   files.set(id, file);
   if (urls.has(id)) URL.revokeObjectURL(urls.get(id));
   urls.set(id, URL.createObjectURL(file));
-  return { id, title: file.name.replace(/\.[^.]+$/, ""), artist: "Local file", album: folder, folderPath: folder, source: "local" };
+  return {
+    id,
+    title: file.name.replace(/\.[^.]+$/, ""),
+    artist: "Local file",
+    album: folder,
+    folderPath: folder,
+    source: "local",
+    modifiedAt: Number.isFinite(file.lastModified) && file.lastModified >= 0
+      ? Math.floor(file.lastModified)
+      : null
+  };
 }
 async function scanFolder(handle, tracks, folder) {
   for await (const entry of handle.values()) {
@@ -999,18 +1120,97 @@ export async function requestJsonMethod(url, method, body) {
   if (!response.ok) throw new Error(data.detail || data.error || "Request failed.");
   return data;
 }
-export async function fetchLyrics(title, artist) {
-  const query = new URLSearchParams({ title, artist });
-  const response = await fetch(`${globalThis.__WAVELENGTH_AUDIO_SERVICE__ || "http://127.0.0.1:8787"}/lyrics?${query}`);
-  if (response.status === 404) return null;
-  let data;
-  try {
-    data = await response.json();
-  } catch {
-    throw new Error("The audio service returned invalid lyrics data.");
+const lyricsCache = new Map();
+const lyricsRequests = new Map();
+const LYRICS_CACHE_LIMIT = 128;
+
+function lyricsRetryDelay(response, attempt) {
+  const retryAfter = response?.headers?.get("Retry-After");
+  if (retryAfter) {
+    const seconds = Number(retryAfter);
+    const delay = Number.isFinite(seconds)
+      ? seconds * 1000
+      : Date.parse(retryAfter) - Date.now();
+    if (Number.isFinite(delay) && delay >= 0) return Math.min(delay, 10000);
   }
-  if (!response.ok) throw new Error(data.detail || "Lyrics are temporarily unavailable.");
-  return data;
+  return 400 * (attempt + 1);
+}
+
+async function requestLyrics(query) {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    let response;
+    try {
+      response = await fetch(
+        `${globalThis.__WAVELENGTH_AUDIO_SERVICE__ || "http://127.0.0.1:8787"}/lyrics?${query}`
+      );
+    } catch (error) {
+      if (attempt === 2) throw error;
+      await new Promise(resolve => setTimeout(resolve, 400 * (attempt + 1)));
+      continue;
+    }
+
+    if (response.status === 404) return null;
+    if (!response.ok) {
+      if ((response.status === 429 || response.status >= 500) && attempt < 2) {
+        await new Promise(resolve => setTimeout(resolve, lyricsRetryDelay(response, attempt)));
+        continue;
+      }
+      let detail;
+      try {
+        const data = await response.json();
+        detail = data.detail || data.error;
+      } catch {
+        detail = null;
+      }
+      throw new Error(detail || "Lyrics are temporarily unavailable.");
+    }
+
+    try {
+      return await response.json();
+    } catch {
+      throw new Error("The audio service returned invalid lyrics data.");
+    }
+  }
+  throw new Error("Lyrics are temporarily unavailable.");
+}
+
+export async function fetchLyrics(title, artist, album, duration, source) {
+  const query = new URLSearchParams({ title, artist, source });
+  if (album && source?.toLowerCase() !== "youtube") query.set("album", album);
+  if (Number.isFinite(duration) && duration >= 1 && duration <= 3600) {
+    query.set("duration", String(Math.round(duration)));
+  }
+  const cacheKey = query.toString();
+  if (lyricsCache.has(cacheKey)) return lyricsCache.get(cacheKey);
+  if (lyricsRequests.has(cacheKey)) return lyricsRequests.get(cacheKey);
+
+  const request = requestLyrics(query)
+    .then(data => {
+      if (data !== null) {
+        lyricsCache.set(cacheKey, data);
+        if (lyricsCache.size > LYRICS_CACHE_LIMIT) {
+          lyricsCache.delete(lyricsCache.keys().next().value);
+        }
+      }
+      return data;
+    })
+    .finally(() => lyricsRequests.delete(cacheKey));
+  lyricsRequests.set(cacheKey, request);
+  return request;
+}
+export function scrollActiveLyricIntoView(index, trackKey) {
+  const line = document.getElementById(`fullscreen-lyric-${index}`);
+  const container = line?.closest(".lyrics-fullscreen .lyrics-lines");
+  if (!line || !container) return false;
+  const activeKey = `${trackKey}:${index}`;
+  if (container.dataset.activeLyricKey === activeKey) return true;
+  container.dataset.activeLyricKey = activeKey;
+  line.scrollIntoView({ block: "center", behavior: "smooth" });
+  return true;
+}
+export function scrollContentToTop() {
+  const content = document.querySelector(".content-inner");
+  if (content) content.scrollTop = 0;
 }
 let roomSocket = null;
 let roomSocketConfig = null;
@@ -1252,6 +1452,13 @@ export function setEqualizer(settings) {
     audio.crossOrigin = "anonymous";
     const context = new Context();
     const source = context.createMediaElementSource(audio);
+    const bypassGain = context.createGain();
+    const equalizerGain = context.createGain();
+    const enabled = settings.enabled === true;
+    bypassGain.gain.value = enabled ? 0 : 1;
+    equalizerGain.gain.value = enabled ? 1 : 0;
+    source.connect(bypassGain);
+    bypassGain.connect(context.destination);
     let previous = source;
     const filters = settings.frequencies.map((frequency, index) => {
       const filter = context.createBiquadFilter();
@@ -1267,12 +1474,17 @@ export function setEqualizer(settings) {
     analyser.fftSize = 2048;
     analyser.smoothingTimeConstant = 0.82;
     previous.connect(analyser);
-    analyser.connect(context.destination);
+    analyser.connect(equalizerGain);
+    equalizerGain.connect(context.destination);
     window.__wavelengthEqualizer = {
       audio,
       context,
+      source,
       filters,
       analyser,
+      bypassGain,
+      equalizerGain,
+      enabled,
       canvasId: null,
       selectedBand: 0,
       preview: null,
@@ -1300,6 +1512,10 @@ export function setEqualizer(settings) {
         [filter.gain, settings.gains[index]]
       ].forEach(([parameter, value]) => parameter.setTargetAtTime(value, context.currentTime, 0.015));
     });
+    const enabled = settings.enabled === true;
+    state.bypassGain.gain.setTargetAtTime(enabled ? 0 : 1, context.currentTime, 0.015);
+    state.equalizerGain.gain.setTargetAtTime(enabled ? 1 : 0, context.currentTime, 0.015);
+    state.enabled = enabled;
   }
   void window.__wavelengthEqualizer.context.resume();
   return true;
@@ -1507,4 +1723,4 @@ export function equalizerCanvasSize() {
 }
 
 
-globalThis.__WAVELENGTH_BROWSER__ = { getLocal, setLocal, removeLocal, installHoverMarquee, watchNarrowWindow, chooseAvatar, getRoomInviteCode, copyRoomCode, copyRoomInvite, setAppearance, isDesktopWindow, checkForUpdates, installUpdate, windowAction, installAppBehaviors, setFontScale, effectiveTheme, startRailResize, searchAudio, restoreSpotify, spotifyLibrary, spotifyPlaylists, spotifyPlaylistTracks, saveSpotifyPlaylist, createSpotifyPlaylist, connectSpotify, disconnectSpotify, setSpotifyRefreshToken, getSpotifyRefreshToken, playAudio, playAudioSource, pauseAudio, seekAudio, readAudioTime, setAudioVolume, downloadAudio, savedDownloadFolderName, chooseDownloadFolder, clearDownloadFolder, savedLibraryFolders, removeSavedLibraryFolder, scanLibrary, chooseFolder, localUrl, roomRequest, requestJson, requestJsonMethod, fetchLyrics, connectRoomSocket, disconnectRoomSocket, emitRoomCommand, emitRoomPlaybackControl, emitRoomPlaybackProgress, emitRoomHostState, drainRoomEvents, uploadRoomTrack, hasLocalAudioFile, roomAudioUrl, openExternalTrack, setEqualizer, startEqualizerVisualization, setEqualizerSelectedBand, setEqualizerPreview, clearEqualizerPreview, equalizerCanvasSize };
+globalThis.__WAVELENGTH_BROWSER__ = { getLocal, setLocal, removeLocal, installHoverMarquee, watchNarrowWindow, chooseAvatar, getRoomInviteCode, copyRoomCode, copyRoomInvite, setAppearance, isDesktopWindow, checkForUpdates, installUpdate, windowAction, installAppBehaviors, setFontScale, effectiveTheme, startRailResize, searchAudio, restoreSpotify, spotifyLibrary, spotifyPlaylists, spotifyAlbums, spotifyPlaylistTracks, spotifyAlbumTracks, renameSpotifyPlaylist, saveSpotifyPlaylist, createSpotifyPlaylist, connectSpotify, disconnectSpotify, setSpotifyRefreshToken, getSpotifyRefreshToken, playAudio, playAudioSource, pauseAudio, seekAudio, readAudioTime, setAudioVolume, downloadAudio, preloadAudio, savedDownloadFolderName, chooseDownloadFolder, savedLibraryFolders, removeSavedLibraryFolder, scanLibrary, chooseFolder, localUrl, roomRequest, requestJson, requestJsonMethod, fetchLyrics, scrollActiveLyricIntoView, scrollContentToTop, connectRoomSocket, disconnectRoomSocket, emitRoomCommand, emitRoomPlaybackControl, emitRoomPlaybackProgress, emitRoomHostState, drainRoomEvents, uploadRoomTrack, hasLocalAudioFile, roomAudioUrl, openExternalTrack, setEqualizer, startEqualizerVisualization, setEqualizerSelectedBand, setEqualizerPreview, clearEqualizerPreview, equalizerCanvasSize };

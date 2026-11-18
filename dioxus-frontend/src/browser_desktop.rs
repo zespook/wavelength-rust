@@ -8,24 +8,24 @@ async fn call_js<T: DeserializeOwned>(function: &str, arguments: &[Value]) -> Re
     let function = serde_json::to_string(function_name).map_err(|error| error.to_string())?;
     let arguments = serde_json::to_string(arguments).map_err(|error| error.to_string())?;
     let script = format!(
-        "try{{const value=await globalThis.__WAVELENGTH_BROWSER__[{function}](...{arguments});const refreshToken=globalThis.__WAVELENGTH_BROWSER__.getSpotifyRefreshToken?.()||null;return {{ok:true,value:value??null,refreshToken}};}}catch(error){{return {{ok:false,error:String(error?.message??error)}};}}"
+        "let result;try{{const value=await globalThis.__WAVELENGTH_BROWSER__[{function}](...{arguments});result={{ok:true,value:value??null}};}}catch(error){{result={{ok:false,error:String(error?.message??error)}};}}result.refreshToken=globalThis.__WAVELENGTH_BROWSER__.getSpotifyRefreshToken?.()||null;return result;"
     );
     let response: Value = dioxus::document::eval(&script)
         .await
         .map_err(|error| format!("The app bridge call {function_name} failed: {error}"))?;
-    if response.get("ok").and_then(Value::as_bool) != Some(true) {
-        return Err(response
-            .get("error")
-            .and_then(Value::as_str)
-            .unwrap_or("The app bridge request failed.")
-            .to_string());
-    }
     if let Some(token) = response
         .get("refreshToken")
         .and_then(Value::as_str)
         .filter(|token| !token.is_empty())
     {
         crate::desktop::set_spotify_refresh_token(Some(token))?;
+    }
+    if response.get("ok").and_then(Value::as_bool) != Some(true) {
+        return Err(response
+            .get("error")
+            .and_then(Value::as_str)
+            .unwrap_or("The app bridge request failed.")
+            .to_string());
     }
     serde_json::from_value(response.get("value").cloned().unwrap_or(Value::Null))
         .map_err(|error| format!("The app bridge returned invalid data: {error}"))
@@ -209,21 +209,33 @@ pub async fn spotify_playlists() -> Result<Vec<SpotifyPlaylist>, String> {
     call_js("spotifyPlaylists", &[]).await
 }
 
+pub async fn spotify_albums() -> Result<Vec<SpotifyAlbum>, String> {
+    call_js("spotifyAlbums", &[]).await
+}
+
 pub async fn spotify_playlist_tracks(id: &str) -> Result<Vec<Track>, String> {
     call_js("spotifyPlaylistTracks", &[Value::String(id.to_string())]).await
 }
 
-pub async fn save_spotify_playlist(
-    id: &str,
-    name: &str,
-    track_uris: &[String],
-) -> Result<(), String> {
+pub async fn spotify_album_tracks(album: &SpotifyAlbum) -> Result<Vec<Track>, String> {
+    let album = serde_json::to_value(album).map_err(|error| error.to_string())?;
+    call_js("spotifyAlbumTracks", &[album]).await
+}
+
+pub async fn save_spotify_playlist(id: &str, track_uris: &[String]) -> Result<(), String> {
     call_js_for_side_effect(
         "saveSpotifyPlaylist",
+        &[Value::String(id.to_string()), js_value(track_uris)?],
+    )
+    .await
+}
+
+pub async fn rename_spotify_playlist(id: &str, name: &str) -> Result<(), String> {
+    call_js_for_side_effect(
+        "renameSpotifyPlaylist",
         &[
             Value::String(id.to_string()),
             Value::String(name.to_string()),
-            js_value(track_uris)?,
         ],
     )
     .await
@@ -275,8 +287,8 @@ pub fn set_volume(value: f64) -> Result<(), String> {
     call_js_sync("setAudioVolume", &[Value::from(value)])
 }
 
-pub async fn download(id: &str, filename: &str) -> Result<String, String> {
-    crate::desktop::download(id, filename).await
+pub async fn download(id: &str, filename: &str, format: &str) -> Result<String, String> {
+    crate::desktop::download(id, filename, format).await
 }
 
 pub async fn saved_download_folder_name() -> Result<Option<String>, String> {
@@ -285,10 +297,6 @@ pub async fn saved_download_folder_name() -> Result<Option<String>, String> {
 
 pub async fn choose_download_folder() -> Result<Option<String>, String> {
     crate::desktop::choose_download_folder().await
-}
-
-pub async fn clear_download_folder() -> Result<(), String> {
-    crate::desktop::clear_download_folder()
 }
 
 pub async fn scan_library() -> Result<Vec<Track>, String> {
@@ -367,6 +375,11 @@ pub async fn download_status(
     Ok(response.tracks)
 }
 
+pub async fn preload_audio(track_ids: &[String], scope: &str) -> Result<(), String> {
+    let ids = serde_json::to_value(track_ids).map_err(|error| error.to_string())?;
+    call_js_for_side_effect("preloadAudio", &[ids, Value::String(scope.to_string())]).await
+}
+
 pub async fn request_json_method<T: DeserializeOwned>(
     url: &str,
     method: &str,
@@ -385,15 +398,36 @@ pub async fn request_json_method<T: DeserializeOwned>(
     .await
 }
 
-pub async fn lyrics(title: &str, artist: &str) -> Result<Option<LyricsResponse>, String> {
+pub async fn lyrics(
+    title: &str,
+    artist: &str,
+    album: &str,
+    duration: f64,
+    source: &str,
+) -> Result<Option<LyricsResponse>, String> {
     call_js(
         "fetchLyrics",
         &[
             Value::String(title.to_string()),
             Value::String(artist.to_string()),
+            Value::String(album.to_string()),
+            Value::from(duration),
+            Value::String(source.to_string()),
         ],
     )
     .await
+}
+
+pub async fn scroll_active_lyric_into_view(index: u32, track_key: &str) -> Result<(), String> {
+    call_js_for_side_effect(
+        "scrollActiveLyricIntoView",
+        &[Value::from(index), Value::String(track_key.to_string())],
+    )
+    .await
+}
+
+pub async fn scroll_content_to_top() -> Result<(), String> {
+    call_js_for_side_effect("scrollContentToTop", &[]).await
 }
 
 pub fn connect_room_socket(
