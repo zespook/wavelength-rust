@@ -95,6 +95,7 @@ pub(crate) fn TrackList(
 pub(crate) fn TrackRow(
     track: Track,
     #[props(default)] context_menu_only: bool,
+    #[props(default)] search_result_actions: bool,
     #[props(default)] is_current: bool,
     #[props(default)] history_actions: bool,
     #[props(default)] favorite_active: bool,
@@ -207,7 +208,7 @@ pub(crate) fn TrackRow(
                         Icon { name: favorite_icon }
                     }
                 } else if !context_menu_only {
-                    if show_add_to_playlist {
+                    if show_add_to_playlist && !search_result_actions {
                         button {
                             class: "row-action",
                             aria_label: "Add {title} to playlist",
@@ -217,17 +218,19 @@ pub(crate) fn TrackRow(
                         }
                     }
                     button { class: "row-action", aria_label: "Add {title} to queue", title: "Add to queue", onclick: move |_| on_queue.call(queue_track.clone()), Icon { name: "list" } }
-                    button { class: "row-action", aria_label: "Favorite {title}", title: "Add to favorites", onclick: move |_| on_favorite.call(favorite_track.clone()), Icon { name: "favorite" } }
-                    button { class: "row-action", aria_label: "More actions for {title}", title: "More actions", onclick: move |event| {
-                        let position = event.client_coordinates();
-                        on_context.call(TrackContextMenu {
-                            track: more_track.clone(),
-                            x: position.x,
-                            y: position.y,
-                        });
-                    }, Icon { name: "more" } }
-                    if !is_local {
-                        button { class: "row-action", aria_label: "Download {title}", title: "Download", onclick: move |_| on_download.call(download_track.clone()), Icon { name: "download" } }
+                    if !search_result_actions {
+                        button { class: "row-action", aria_label: "Favorite {title}", title: "Add to favorites", onclick: move |_| on_favorite.call(favorite_track.clone()), Icon { name: "favorite" } }
+                        button { class: "row-action", aria_label: "More actions for {title}", title: "More actions", onclick: move |event| {
+                            let position = event.client_coordinates();
+                            on_context.call(TrackContextMenu {
+                                track: more_track.clone(),
+                                x: position.x,
+                                y: position.y,
+                            });
+                        }, Icon { name: "more" } }
+                        if !is_local {
+                            button { class: "row-action", aria_label: "Download {title}", title: "Download", onclick: move |_| on_download.call(download_track.clone()), Icon { name: "download" } }
+                        }
                     }
                 }
             }

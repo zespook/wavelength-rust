@@ -63,10 +63,8 @@ pub(super) fn SpotifyPlaylistsPage(data: std::rc::Rc<PageData>) -> Element {
                 let save_selected_id = selected.id.clone();
                 let current_track = (app_state.current)();
                 let is_playing = (app_state.playing)();
-                let can_edit = spotify_playlist_is_owned(
-                    (app_state.spotify_profile)().as_ref(),
-                    &selected,
-                );
+                let can_edit =
+                    spotify_playlist_is_owned((app_state.spotify_profile)().as_ref(), &selected);
                 let owner_label = (!selected.owner_name.is_empty())
                     .then(|| format!("By {}", selected.owner_name));
 

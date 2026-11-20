@@ -1855,7 +1855,9 @@ svg {
 
 .home-library-preview {
 	display: grid;
+	grid-template-columns: 128px minmax(0, 1fr);
 	align-content: center;
+	align-items: center;
 	gap: var(--space-6);
 	min-width: 0;
 	min-height: 0;
@@ -1906,6 +1908,7 @@ svg {
 
 .home-preview-link {
 	display: flex;
+	grid-column: 1 / -1;
 	align-items: center;
 	justify-content: space-between;
 	gap: var(--space-3);
@@ -2864,7 +2867,7 @@ svg {
 }
 
 .collection-detail-title {
-	flex: 1;
+	flex: 0 1 auto;
 	min-width: 0;
 }
 
@@ -4424,11 +4427,27 @@ svg {
 
 .qobuz-credentials-modal,
 .playlist-create-modal,
+.track-playlist-picker-modal,
 .color-picker-modal,
 .song-details-modal {
 	display: grid;
 	align-content: start;
 	gap: var(--space-3);
+}
+
+.track-playlist-picker-modal {
+	width: min(440px, 100%);
+	overflow: visible;
+}
+
+.track-playlist-picker-select .select-menu-options {
+	max-height: min(232px, 50vh);
+	overflow-y: auto;
+}
+
+.track-playlist-picker-empty {
+	margin: 0;
+	color: var(--muted);
 }
 
 .qobuz-credentials-modal .folder-modal-heading,
@@ -5435,6 +5454,12 @@ svg {
 	max-width: var(--page-content-width);
 	width: 100%;
 	margin-inline: auto;
+}
+
+.content-inner.page-layout > header,
+.content-inner.page-settings > .library-page-heading {
+	max-width: 100%;
+	width: 100%;
 }
 
 .lyrics-sync-toggle {

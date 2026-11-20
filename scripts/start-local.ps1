@@ -52,7 +52,7 @@ function Start-BackgroundService([string]$Name, [string]$WorkingDirectory, [int]
   throw "$Name did not start listening on port $Port. Check logs in $logDirectory."
 }
 
-& $Python -c "import fastapi, uvicorn, spotipy, yt_dlp, SpotiFLAC, httpx, mutagen, dotenv" 2>$null
+& $Python -c "import fastapi, uvicorn, spotipy, yt_dlp, SpotiFLAC, httpx, mutagen, dotenv; from importlib.metadata import version; from packaging.version import Version; installed = Version(version('SpotiFLAC')); assert Version('5.0.6') <= installed < Version('6.0.0')" 2>$null
 if ($LASTEXITCODE -ne 0) {
   $PythonUserBase = (& $Python -c "import site; print(site.USER_BASE)").Trim()
   $AudioVenv = Join-Path $PythonUserBase 'wavelength-audio-venv'

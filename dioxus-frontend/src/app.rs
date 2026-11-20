@@ -334,6 +334,8 @@ pub(crate) fn App() -> Element {
     let mut download_format = use_signal(|| "flac".to_string());
     let mut context_track = use_signal(|| Option::<TrackContextMenu>::None);
     let mut context_playlist = use_signal(|| Option::<PlaylistContextMenu>::None);
+    let mut track_playlist_picker_track = use_signal(|| Option::<Track>::None);
+    let mut track_playlist_picker_selection = use_signal(String::new);
     let mut detail_track = use_signal(|| Option::<Track>::None);
     let mut lyrics_fullscreen = use_signal(|| false);
     let mut lyrics_follow_playback = use_signal(|| true);
@@ -833,18 +835,12 @@ pub(crate) fn App() -> Element {
                 browser::load::<bool>("wavelength-setup-complete"),
                 Ok(Some(true))
             );
-            let saved_theme = browser::load::<String>("wavelength-theme")
-                .ok()
-                .flatten();
-            let saved_accent = browser::load::<String>("wavelength-accent")
-                .ok()
-                .flatten();
+            let saved_theme = browser::load::<String>("wavelength-theme").ok().flatten();
+            let saved_accent = browser::load::<String>("wavelength-accent").ok().flatten();
             let saved_background = browser::load::<String>("wavelength-background-color")
                 .ok()
                 .flatten();
-            let saved_font_scale = browser::load::<f64>("wavelength-font-scale")
-                .ok()
-                .flatten();
+            let saved_font_scale = browser::load::<f64>("wavelength-font-scale").ok().flatten();
             let saved_download_format = browser::load::<String>("wavelength-download-format")
                 .ok()
                 .flatten();
@@ -3013,6 +3009,7 @@ pub(crate) fn App() -> Element {
                                         let details_target = track.clone();
                                         let queue_target = track.clone();
                                         let favorite_target = track.clone();
+                                        let add_to_playlist_target = track.clone();
                                         let download_target = track.clone();
                                         let download_disabled = track.is_local();
                                         rsx! {
@@ -3021,38 +3018,118 @@ pub(crate) fn App() -> Element {
                                             detail_track.set(Some(details_target.clone()));
                                             context_track.set(None);
                                         }, "Song details" }
-                                        for playlist in playlists() {
-                                            button { key: "{playlist.id}", onclick: {
-                                                let playlist_id = playlist.id.clone();
-                                                let selected_track = track.clone();
-                                                move |_| {
-                                                    let mut all = playlists();
-                                                    if let Some(target) = all.iter_mut().find(|item| item.id == playlist_id) {
-                                                        if !target.tracks.iter().any(|item| item.key() == selected_track.key()) {
-                                                            target.tracks.push(selected_track.clone());
-                                                            playlists.set(all.clone());
-                                                            save_saved("wavelength-playlists", &all, notice);
-                                                        }
-                                                    }
-                                                    context_track.set(None);
-                                                }
-                                            }, "Add to {playlist.name}" }
-                                        }
+                                        button { onclick: move |_| {
+                                            track_playlist_picker_track.set(Some(add_to_playlist_target.clone()));
+                                            track_playlist_picker_selection.set(String::new());
+                                            context_track.set(None);
+                                        }, "Add to playlist" }
+                                        button { onclick: move |_| {
+                                            add_track_to_favorites(favorite_target.clone(), favorites, notice);
+                                            context_track.set(None);
+                                        }, "Add to favorites" }
                                         button { onclick: move |_| {
                                             add_to_queue(queue_target.clone(), queue, notice);
                                             context_track.set(None);
                                         }, "Add to queue" }
-                                        if page() != Page::History {
-                                            button { onclick: move |_| {
-                                                toggle_favorite(favorite_target.clone(), favorites, notice);
-                                                context_track.set(None);
-                                            }, "Toggle favorite" }
-                                        }
                                         button { disabled: download_disabled, onclick: move |_| {
                                             download_track(download_target.clone(), download_format(), notice);
                                             context_track.set(None);
                                         }, "Download track" }
                                     }
+                                        }
+                                    }
+                                }
+                                if let Some(track) = track_playlist_picker_track() {
+                                    {
+                                        let track_title = track.title.clone();
+                                        let selected_playlist_id = track_playlist_picker_selection();
+                                        let available_playlists = playlists();
+                                        let has_playlists = !available_playlists.is_empty();
+                                        let can_confirm = has_playlists
+                                            && available_playlists
+                                                .iter()
+                                                .any(|playlist| playlist.id == selected_playlist_id);
+                                        let track_to_add = track.clone();
+                                        let playlist_options = std::iter::once((
+                                            String::new(),
+                                            "Choose a playlist".to_string(),
+                                        ))
+                                        .chain(
+                                            available_playlists
+                                                .iter()
+                                                .map(|playlist| (playlist.id.clone(), playlist.name.clone())),
+                                        )
+                                        .collect::<Vec<_>>();
+                                        rsx! {
+                                            div { class: "modal-backdrop track-playlist-picker-backdrop",
+                                                div {
+                                                    class: "modal track-playlist-picker-modal",
+                                                    role: "dialog",
+                                                    aria_modal: "true",
+                                                    aria_labelledby: "track-playlist-picker-title",
+                                                    button {
+                                                        class: "modal-close",
+                                                        aria_label: "Close playlist selector",
+                                                        onclick: move |_| {
+                                                            track_playlist_picker_track.set(None);
+                                                            track_playlist_picker_selection.set(String::new());
+                                                        },
+                                                        Icon { name: "close" }
+                                                    }
+                                                    div { class: "folder-modal-heading",
+                                                        div { class: "folder-modal-title",
+                                                            h2 { id: "track-playlist-picker-title", "Add to playlist" }
+                                                        }
+                                                        p { "Choose a playlist for {track_title}." }
+                                                    }
+                                                    if has_playlists {
+                                                        CustomSelect {
+                                                            value: selected_playlist_id.clone(),
+                                                            options: playlist_options,
+                                                            on_change: move |value| track_playlist_picker_selection.set(value),
+                                                            aria_label: "Select a playlist",
+                                                            class_name: "track-playlist-picker-select",
+                                                        }
+                                                    } else {
+                                                        p { class: "track-playlist-picker-empty", "Create a playlist before adding tracks." }
+                                                    }
+                                                    div { class: "playlist-create-actions",
+                                                        button {
+                                                            class: "outline-button",
+                                                            r#type: "button",
+                                                            onclick: move |_| {
+                                                                track_playlist_picker_track.set(None);
+                                                                track_playlist_picker_selection.set(String::new());
+                                                            },
+                                                            "Cancel"
+                                                        }
+                                                        button {
+                                                            class: "solid-button",
+                                                            r#type: "button",
+                                                            disabled: !can_confirm,
+                                                            onclick: move |_| {
+                                                                if can_confirm {
+                                                                    add_track_to_playlist(
+                                                                        track_to_add.clone(),
+                                                                        &selected_playlist_id,
+                                                                        playlists,
+                                                                        room_shared_playlists,
+                                                                        room_role,
+                                                                        local_tracks,
+                                                                        favorites,
+                                                                        history,
+                                                                        queue,
+                                                                        notice,
+                                                                    );
+                                                                    track_playlist_picker_track.set(None);
+                                                                    track_playlist_picker_selection.set(String::new());
+                                                                }
+                                                            },
+                                                            "Add to playlist"
+                                                        }
+                                                    }
+                                                }
+                                            }
                                         }
                                     }
                                 }
@@ -3134,11 +3211,9 @@ pub(crate) fn App() -> Element {
                                                                 context_playlist.set(None);
                                                             }, "Download album tracks" }
                                                             button { disabled: !has_tracks, onclick: move |_| {
-                                                                for track in favorite_tracks.clone() {
-                                                                    toggle_favorite(track, favorites, notice);
-                                                                }
+                                                                add_tracks_to_favorites(favorite_tracks.clone(), favorites, notice);
                                                                 context_playlist.set(None);
-                                                            }, "Toggle album track favorites" }
+                                                            }, "Add album tracks to favorites" }
                                                         }
                                                     },
                                                     PlaylistMenuTarget::SpotifyAlbum(album) => {

@@ -80,7 +80,11 @@ fn delete_app_data() -> Result<(), String> {
     set_spotify_refresh_token(None)?;
     set_room_server_passcode(None)?;
     let project_dirs = project_dirs()?;
-    for directory in [project_dirs.data_dir(), project_dirs.config_dir(), project_dirs.cache_dir()] {
+    for directory in [
+        project_dirs.data_dir(),
+        project_dirs.config_dir(),
+        project_dirs.cache_dir(),
+    ] {
         if directory.exists() {
             fs::remove_dir_all(directory).map_err(|error| {
                 format!(
@@ -222,11 +226,7 @@ fn load_window_icon() -> Result<Option<dioxus::desktop::tao::window::Icon>, Stri
 
 pub fn run(app: fn() -> Element) {
     let arguments = env::args_os().skip(1).collect::<Vec<_>>();
-    if arguments
-        .first()
-        .and_then(|argument| argument.to_str())
-        == Some("--delete-app-data")
-    {
+    if arguments.first().and_then(|argument| argument.to_str()) == Some("--delete-app-data") {
         match delete_app_data() {
             Ok(()) => std::process::exit(0),
             Err(error) => {

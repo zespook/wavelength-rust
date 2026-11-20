@@ -535,12 +535,6 @@
   }
 }
 
-@media (max-width: 947px) {
-  .app-shell {
-    --page-gutter: clamp(16px, 2.5vw, 24px);
-  }
-}
-
 @media (max-width: 736px) {
   .topbar {
     grid-template-columns: 126px minmax(0, 1fr) max-content;
@@ -681,5 +675,158 @@
 
   .app-shell:not(.queue-closed) .playlists-toolbar {
     grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+:root {
+  --page-gutter: clamp(24px, 4vw, 48px);
+}
+
+html,
+body,
+#app {
+  min-width: 0;
+  min-height: 0;
+}
+
+body {
+  width: calc(100vw * var(--app-layout-scale, 1));
+  height: calc(100dvh * var(--app-layout-scale, 1));
+}
+
+#app.app-shell {
+  width: calc(100vw * var(--app-layout-scale, 1));
+  height: calc(100dvh * var(--app-layout-scale, 1) - var(--player-height));
+  min-width: 0;
+  min-height: 0;
+  container-name: app-shell;
+  container-type: inline-size;
+}
+
+.app-shell {
+  min-width: 0;
+  min-height: 0;
+}
+
+.workspace-cluster {
+  width: 100%;
+  height: calc(100dvh * var(--app-layout-scale, 1) - var(--window-height) - var(--player-height));
+  min-width: 0;
+  min-height: 0;
+}
+
+.topbar,
+.player-bar {
+  width: calc(100vw * var(--app-layout-scale, 1));
+}
+
+.home-hero {
+  gap: clamp(24px, 4vw, 48px);
+  min-height: min(480px, calc(100dvh * var(--app-layout-scale, 1) - var(--window-height) - var(--player-height) - 112px));
+}
+
+.home-greeting > p:last-child {
+  font-size: calc(16px * var(--font-size-scale, 1));
+}
+
+.content-inner.page-home {
+  gap: var(--space-8);
+}
+
+.collection-detail-main {
+  grid-template-columns: minmax(200px, min(34%, 320px)) minmax(0, 1fr);
+  align-items: start;
+  gap: var(--space-6);
+}
+
+.collection-detail-cover {
+  max-width: 320px;
+}
+
+.collection-detail-copy {
+  align-self: center;
+}
+
+.settings-dashboard {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: start;
+  gap: var(--space-4);
+}
+
+.settings-card {
+  margin-bottom: 0;
+}
+
+@container app-shell (max-width: 736px) {
+  .topbar {
+    grid-template-columns: 112px minmax(0, 1fr) max-content;
+    gap: var(--space-2);
+    padding-left: var(--space-3);
+  }
+
+  .topbar-start {
+    gap: var(--space-2);
+  }
+
+  .topbar-navigation-button {
+    width: 28px;
+    height: 28px;
+  }
+}
+
+@container app-shell (max-width: 700px) {
+  .workspace-cluster {
+    --rail-width: max(160px, min(230px, calc(100vw * var(--app-layout-scale, 1) - var(--sidebar-compact) - 260px)));
+  }
+
+  .right-rail,
+  .details-rail {
+    min-width: 0;
+  }
+}
+
+@container app-shell (max-width: 600px) {
+  .player-bar {
+    grid-template-columns: minmax(88px, .8fr) minmax(128px, 1fr) minmax(112px, auto);
+    gap: var(--space-2);
+    padding-inline: var(--space-2);
+  }
+}
+
+@container page-area (max-width: 1000px) {
+  .content-inner.page-settings .settings-dashboard {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@container page-area (max-width: 900px) {
+  .now-playing-page {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .lyrics-panel {
+    grid-row: auto;
+  }
+}
+
+@container page-area (max-width: 620px) {
+  .collection-detail-main {
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--space-4);
+  }
+
+  .collection-detail-cover {
+    width: min(100%, 320px);
+  }
+}
+
+@container page-area (max-width: 560px) {
+  .now-playing-track-section {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .now-playing-art {
+    width: min(100%, 320px);
   }
 }

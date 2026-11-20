@@ -1021,9 +1021,7 @@ struct SpotifyPlaylist {
 
 fn spotify_playlist_is_owned(profile: Option<&SpotifyProfile>, playlist: &SpotifyPlaylist) -> bool {
     profile.is_some_and(|profile| {
-        !profile.id.is_empty()
-            && !playlist.owner_id.is_empty()
-            && playlist.owner_id == profile.id
+        !profile.id.is_empty() && !playlist.owner_id.is_empty() && playlist.owner_id == profile.id
     })
 }
 
@@ -2563,6 +2561,60 @@ fn toggle_favorite(track: Track, mut favorites: Signal<Vec<Track>>, mut notice: 
     favorites.set(items.clone());
     if let Err(error) = browser::save("wavelength-favorites", &items) {
         notice.set(error);
+    }
+}
+
+fn add_favorite_once(track: Track, favorites: &mut Vec<Track>) -> bool {
+    if favorites.iter().any(|item| item.key() == track.key()) {
+        return false;
+    }
+
+    favorites.push(track);
+    true
+}
+
+fn add_track_to_favorites(
+    track: Track,
+    mut favorites: Signal<Vec<Track>>,
+    mut notice: Signal<String>,
+) {
+    let title = track.title.clone();
+    let mut items = favorites();
+    if !add_favorite_once(track, &mut items) {
+        notice.set(format!("{title} is already in favorites."));
+        return;
+    }
+
+    favorites.set(items.clone());
+    match browser::save("wavelength-favorites", &items) {
+        Ok(()) => notice.set(format!("{title} added to favorites.")),
+        Err(error) => notice.set(error),
+    }
+}
+
+fn add_tracks_to_favorites(
+    tracks: Vec<Track>,
+    mut favorites: Signal<Vec<Track>>,
+    mut notice: Signal<String>,
+) {
+    let mut items = favorites();
+    let added = tracks
+        .into_iter()
+        .filter(|track| add_favorite_once(track.clone(), &mut items))
+        .count();
+
+    if added == 0 {
+        notice.set("These tracks are already in favorites.".to_string());
+        return;
+    }
+
+    favorites.set(items.clone());
+    match browser::save("wavelength-favorites", &items) {
+        Ok(()) => notice.set(format!(
+            "{added} {} added to favorites.",
+            if added == 1 { "track" } else { "tracks" }
+        )),
+        Err(error) => notice.set(error),
     }
 }
 

@@ -284,6 +284,7 @@ export function installAppBehaviors() {
     }
     scale = Math.round(value * 10) / 10;
     root.style.setProperty("--app-scale", String(scale));
+    root.style.setProperty("--app-layout-scale", String(1 / scale));
     localStorage.setItem(key, String(scale));
   };
   applyScale(scale);
@@ -323,6 +324,7 @@ export function setInterfaceZoom(value) {
   }
   const nextScale = Math.round(scale * 10) / 10;
   document.documentElement.style.setProperty("--app-scale", String(nextScale));
+  document.documentElement.style.setProperty("--app-layout-scale", String(1 / nextScale));
   localStorage.setItem("wavelength-ui-scale", String(nextScale));
   return true;
 }
