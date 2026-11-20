@@ -47,7 +47,6 @@ pub(super) struct PageData {
     active_track_is_favorite: bool,
     home_featured_track: Option<Track>,
     recently_added: Vec<Track>,
-    home_playlists: Vec<Playlist>,
     home_albums: Vec<(String, Vec<Track>)>,
     artist_stats: Vec<(String, u64)>,
     song_stats: Vec<(String, String, u64)>,
@@ -282,12 +281,6 @@ pub(super) fn PageContent() -> Element {
     });
     let home_featured_track = local_tracks().first().cloned();
     let recently_added = local_tracks().into_iter().take(9).collect::<Vec<_>>();
-    let mut home_playlists = playlists()
-        .into_iter()
-        .filter(|playlist| !playlist.tracks.is_empty())
-        .collect::<Vec<_>>();
-    sort_track_collections(&mut home_playlists, |playlist| &playlist.tracks);
-    home_playlists.truncate(8);
     let mut home_albums = group_local_tracks(local_tracks(), "album");
     sort_track_collections(&mut home_albums, |(_, tracks)| tracks);
     let (artist_stats, song_stats) =
@@ -391,7 +384,6 @@ pub(super) fn PageContent() -> Element {
         active_track_is_favorite: active_track_is_favorite,
         home_featured_track: home_featured_track,
         recently_added: recently_added,
-        home_playlists: home_playlists,
         home_albums: home_albums,
         artist_stats: artist_stats,
         song_stats: song_stats,

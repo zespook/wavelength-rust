@@ -8,6 +8,7 @@ import {
   emitRoomCommand,
   fetchLyrics,
   preloadAudio,
+  requestJsonMethod,
   scrollActiveLyricIntoView,
   setSpotifyRefreshToken,
   searchAudio,
@@ -536,7 +537,8 @@ test("Spotify library import loads playlist artwork, saved albums, and playlist 
           id: "playlist-1",
           name: "Saved mix",
           tracks: { total: 1 },
-          images: [{ url: "https://images.example/playlist.jpg", width: 300, height: 300 }]
+      images: [{ url: "https://images.example/playlist.jpg", width: 300, height: 300 }],
+      owner: { id: "test-user", display_name: "Test User" }
         }],
         next: null
       });
@@ -589,6 +591,8 @@ test("Spotify library import loads playlist artwork, saved albums, and playlist 
     const albumTracks = await spotifyAlbumTracks(albums[0]);
 
     assert.equal(playlists[0].thumbnail, "https://images.example/playlist.jpg");
+    assert.equal(playlists[0].owner_id, "test-user");
+    assert.equal(playlists[0].owner_name, "Test User");
     assert.deepEqual(albums[0], {
       id: "album-1",
       name: "Studio album",
@@ -622,6 +626,96 @@ test("Spotify playlist detail rejects repeated pagination URLs", async () => {
   try {
     await assert.rejects(spotifyPlaylistTracks("playlist-loop"), /repeated playlist page/);
     assert.equal(requests.length, 1);
+  } finally {
+    globalThis.fetch = originalFetch;
+    setSpotifyRefreshToken("");
+  }
+});
+
+test("Spotify playlist detail falls back to tracks after an items 403", async () => {
+  const originalFetch = globalThis.fetch;
+  const requests = [];
+  setSpotifyRefreshToken("test-refresh-token");
+  globalThis.fetch = async input => {
+    const url = new URL(input);
+    requests.push(url);
+    if (url.pathname.endsWith("/api/token")) {
+      return new Response('{"access_token":"test-access-token","expires_in":3600}', {
+        headers: { "Content-Type": "application/json" }
+      });
+    }
+    if (url.pathname === "/v1/playlists/other-user/items") {
+      return new Response('{"error":{"status":403,"message":"Forbidden"}}', {
+        status: 403,
+        headers: { "Content-Type": "application/json" }
+      });
+    }
+    if (url.pathname === "/v1/playlists/other-user/tracks") {
+      return new Response(JSON.stringify({
+        items: [{
+          track: {
+            id: "track-1",
+            name: "Shared playlist track",
+            artists: [{ name: "Example artist" }],
+            duration_ms: 180000
+          }
+        }],
+        next: null
+      }), { headers: { "Content-Type": "application/json" } });
+    }
+    throw new Error(`Unexpected Spotify request: ${url}`);
+  };
+
+  try {
+    const tracks = await spotifyPlaylistTracks("other-user");
+    assert.equal(tracks.length, 1);
+    assert.equal(tracks[0].title, "Shared playlist track");
+    assert.equal(requests.filter(url => url.pathname.endsWith("/items")).length, 1);
+    assert.equal(requests.filter(url => url.pathname.endsWith("/tracks")).length, 1);
+  } finally {
+    globalThis.fetch = originalFetch;
+    setSpotifyRefreshToken("");
+  }
+});
+
+test("Spotify public playlist details recover through the audio service fallback", async () => {
+  const originalFetch = globalThis.fetch;
+  setSpotifyRefreshToken("test-refresh-token");
+  globalThis.fetch = async input => {
+    const url = new URL(input);
+    if (url.pathname.endsWith("/api/token")) {
+      return new Response('{"access_token":"test-access-token","expires_in":3600}', {
+        headers: { "Content-Type": "application/json" }
+      });
+    }
+    if (url.pathname === "/v1/playlists/public-other/items"
+      || url.pathname === "/v1/playlists/public-other/tracks") {
+      return new Response('{"error":{"status":403,"message":"Forbidden"}}', {
+        status: 403,
+        headers: { "Content-Type": "application/json" }
+      });
+    }
+    if (url.pathname === "/search") {
+      return new Response(JSON.stringify({
+        results: [{
+          id: "public-track",
+          title: "Public playlist track",
+          artist: "Public artist",
+          album: "Public album",
+          thumbnail: "https://images.example/public.jpg",
+          duration: 202,
+          source: "spotify"
+        }]
+      }), { headers: { "Content-Type": "application/json" } });
+    }
+    throw new Error(`Unexpected Spotify request: ${url}`);
+  };
+
+  try {
+    const tracks = await spotifyPlaylistTracks("public-other");
+    assert.equal(tracks.length, 1);
+    assert.equal(tracks[0].title, "Public playlist track");
+    assert.equal(tracks[0].source, "spotify");
   } finally {
     globalThis.fetch = originalFetch;
     setSpotifyRefreshToken("");
@@ -806,5 +900,31 @@ test("Spotify album detail times out while the response body is stalled", async 
     globalThis.fetch = originalFetch;
     globalThis.setTimeout = originalSetTimeout;
     setSpotifyRefreshToken("");
+  }
+});
+
+test("requestJsonMethod sends an already serialized JSON body without quoting it again", async () => {
+  const originalFetch = globalThis.fetch;
+  const payload = JSON.stringify({
+    app_id: "app-id",
+    app_secret: "app-secret",
+    user_token: "user-token"
+  });
+  let requestBody;
+  globalThis.fetch = async (_input, options) => {
+    requestBody = options.body;
+    return {
+      ok: true,
+      json: async () => ({ configured: true })
+    };
+  };
+
+  try {
+    const response = await requestJsonMethod("/settings/qobuz", "PUT", payload);
+    assert.deepEqual(response, { configured: true });
+    assert.equal(requestBody, payload);
+    assert.deepEqual(JSON.parse(requestBody), JSON.parse(payload));
+  } finally {
+    globalThis.fetch = originalFetch;
   }
 });

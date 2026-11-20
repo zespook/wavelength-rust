@@ -11,8 +11,6 @@ pub(super) fn HomePage(data: std::rc::Rc<PageData>) -> Element {
     let mut app_state = use_context::<AppState>();
     let home_featured_track = data.home_featured_track.clone();
     let recently_added = data.recently_added.clone();
-    let home_playlists = data.home_playlists.clone();
-    let home_albums = data.home_albums.clone();
     let artist_stats = data.artist_stats.clone();
     let song_stats = data.song_stats.clone();
     let playlist_count = library_playlist_count(
@@ -26,6 +24,7 @@ pub(super) fn HomePage(data: std::rc::Rc<PageData>) -> Element {
     } else {
         "playlists"
     };
+    let download_folder_name = (app_state.download_folder_name)();
     match Page::Home {
         Page::Home => rsx! {
             section { class: "home-hero",
@@ -35,25 +34,38 @@ pub(super) fn HomePage(data: std::rc::Rc<PageData>) -> Element {
                         h1 { "Your music, within reach" }
                         p { "Search across music services or bring your own collection together" }
                     }
-                    div { class: "home-actions",
-                        button { class: "solid-button", onclick: move |_| focus_search_bar(app_state.notice),
-                            Icon { name: "search" }
-                            "Find music"
-                        }
-                        button { class: "outline-button", onclick: move |_| {
-                            spawn(async move {
-                                match browser::choose_folder().await {
-                                    Ok(Some(tracks)) => {
-                                        app_state.local_tracks.set(merge_local_tracks((app_state.local_tracks)(), tracks));
-                                        app_state.page.set(Page::Library);
-                                    }
-                                    Ok(None) => {}
-                                    Err(error) => app_state.notice.set(error),
+                    if download_folder_name.is_empty() || (app_state.history)().is_empty() {
+                        div { class: "home-actions",
+                            if download_folder_name.is_empty() {
+                                button { class: "outline-button", onclick: move |_| {
+                                    let mut folder_name = app_state.download_folder_name;
+                                    let mut notice = app_state.notice;
+                                    spawn(async move {
+                                        match browser::choose_download_folder().await {
+                                            Ok(Some(name)) => {
+                                                folder_name.set(name);
+                                                notice.set(String::new());
+                                            }
+                                            Ok(None) => {}
+                                            Err(error) => notice.set(error),
+                                        }
+                                    });
+                                },
+                                    Icon { name: "folder" }
+                                    "Set download folder"
                                 }
-                            });
-                        },
-                            Icon { name: "folder" }
-                            "Set downloads folder"
+                            }
+                            if (app_state.history)().is_empty() {
+                                button { class: "solid-button", onclick: move |_| focus_search_bar(app_state.notice),
+                                    Icon { name: "search" }
+                                    "Find music"
+                                }
+                            }
+                        }
+                    }
+                    if download_folder_name.is_empty() {
+                        p { class: "home-download-disclaimer",
+                            "Set a download folder before downloading music. Wavelength does not save downloads without one."
                         }
                     }
                     p { class: "home-library-count",
@@ -106,72 +118,6 @@ pub(super) fn HomePage(data: std::rc::Rc<PageData>) -> Element {
                     }
                 } else {
                     p { class: "settings-empty", "Recent plays will appear here" }
-                }
-            }
-            if !home_playlists.is_empty() || !home_albums.is_empty() {
-                section { class: "home-section home-collections",
-                    div { class: "section-head",
-                        div {
-                            p { class: "eyebrow", "Your library" }
-                            h2 { "Recent playlists and albums" }
-                        }
-                        button { class: "text-button", onclick: move |_| app_state.page.set(Page::Playlists), "View library" }
-                    }
-                    div { class: "home-collection-grid",
-                        for playlist in home_playlists.iter().cloned() {
-                            button {
-                                class: "home-collection-card",
-                                key: "{playlist.id}",
-                                onclick: {
-                                    let id = playlist.id.clone();
-                                    move |_| {
-                                        app_state.selected_playlist_id.set(Some(id.clone()));
-                                        app_state.page.set(Page::PlaylistDetail);
-                                    }
-                                },
-                                span { class: "mini-art",
-                                    if let Some(track) = playlist.tracks.first() {
-                                        if let Some(image) = track.thumbnail.as_deref() {
-                                            img { src: "{image}", alt: "" }
-                                        } else {
-                                            Icon { name: "list" }
-                                        }
-                                    } else {
-                                        Icon { name: "list" }
-                                    }
-                                }
-                                span {
-                                    strong { "{playlist.name}" }
-                                    small { "Playlist · {playlist.tracks.len()} songs" }
-                                }
-                            }
-                        }
-                        for (name, tracks) in home_albums.iter().take(6) {
-                            button {
-                                class: "home-collection-card",
-                                key: "album-{name}",
-                                onclick: {
-                                    let album_name = name.clone();
-                                    move |_| {
-                                        app_state.spotify_album_selected.set(None);
-                                        app_state.album_detail_name.set(Some(album_name.clone()));
-                                        app_state.page.set(Page::AlbumDetail);
-                                    }
-                                },
-                                span { class: "mini-art",
-                                    if let Some(image) = tracks.first().and_then(|track| track.thumbnail.as_deref()) {
-                                        img { src: "{image}", alt: "" }
-                                    } else {
-                                        Icon { name: "disc" }
-                                    }
-                                }
-                                span {
-                                    strong { "{name}" }
-                                    small { "Album · {tracks.len()} songs" }
-                                }
-                            }
-                        }
-                    }
                 }
             }
             if !recently_added.is_empty() {

@@ -92,6 +92,14 @@ pub fn set_font_scale(value: f64) -> Result<(), String> {
     call_js_sync("setFontScale", &[Value::from(value)])
 }
 
+pub fn set_interface_zoom(value: f64) -> Result<(), String> {
+    call_js_sync("setInterfaceZoom", &[Value::from(value)])
+}
+
+pub async fn get_interface_zoom() -> Result<f64, String> {
+    call_js("getInterfaceZoom", &[]).await
+}
+
 pub fn is_desktop_window() -> Result<bool, String> {
     Ok(true)
 }

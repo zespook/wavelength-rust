@@ -1,5 +1,7 @@
 use crate::{Track, UpdateInfo};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+#[cfg(target_os = "macos")]
+use dioxus::desktop::tao::platform::macos::WindowBuilderExtMacOS;
 use dioxus::{
     desktop::{Config, LogicalSize, WindowBuilder},
     prelude::Element,
@@ -72,6 +74,23 @@ fn app_state() -> Result<&'static DesktopState, String> {
     STATE
         .get()
         .ok_or_else(|| "Native application services have not started.".to_string())
+}
+
+fn delete_app_data() -> Result<(), String> {
+    set_spotify_refresh_token(None)?;
+    set_room_server_passcode(None)?;
+    let project_dirs = project_dirs()?;
+    for directory in [project_dirs.data_dir(), project_dirs.config_dir(), project_dirs.cache_dir()] {
+        if directory.exists() {
+            fs::remove_dir_all(directory).map_err(|error| {
+                format!(
+                    "Could not delete app data directory '{}': {error}",
+                    directory.display()
+                )
+            })?;
+        }
+    }
+    Ok(())
 }
 
 fn settings_path() -> Result<PathBuf, String> {
@@ -203,6 +222,19 @@ fn load_window_icon() -> Result<Option<dioxus::desktop::tao::window::Icon>, Stri
 
 pub fn run(app: fn() -> Element) {
     let arguments = env::args_os().skip(1).collect::<Vec<_>>();
+    if arguments
+        .first()
+        .and_then(|argument| argument.to_str())
+        == Some("--delete-app-data")
+    {
+        match delete_app_data() {
+            Ok(()) => std::process::exit(0),
+            Err(error) => {
+                eprintln!("Could not delete Wavelength app data: {error}");
+                std::process::exit(1);
+            }
+        }
+    }
     if arguments.first().and_then(|argument| argument.to_str()) == Some("--install-services") {
         let (system_install, archive_override) =
             match parse_service_install_arguments(&arguments[1..]) {
@@ -247,7 +279,20 @@ pub fn run(app: fn() -> Element) {
             std::process::exit(1);
         }
     };
-    let (width, height) = saved_window_size(&settings).unwrap_or((1280, 800));
+    let (width, height) = saved_window_size(&settings).unwrap_or((850, 600));
+    let window_builder = WindowBuilder::new()
+        .with_title("Wavelength")
+        .with_window_icon(window_icon)
+        .with_inner_size(LogicalSize::new(width, height))
+        .with_min_inner_size(LogicalSize::new(750.0, 600.0));
+    #[cfg(target_os = "macos")]
+    let window_builder = window_builder
+        .with_decorations(true)
+        .with_titlebar_transparent(true)
+        .with_title_hidden(true)
+        .with_fullsize_content_view(true);
+    #[cfg(not(target_os = "macos"))]
+    let window_builder = window_builder.with_decorations(false);
     let window_slot = std::sync::Arc::new(Mutex::new(None));
     let window_for_events = window_slot.clone();
     let child_handle = &state.service_child;
@@ -267,7 +312,7 @@ pub fn run(app: fn() -> Element) {
     let config = Config::new()
         .with_resource_directory(&state.resource_dir)
         .with_data_directory(state.data_dir.join("webview"))
-        .with_disable_context_menu(false)
+        .with_disable_context_menu(!cfg!(debug_assertions))
         .with_custom_head(format!(
             "<script>globalThis.__WAVELENGTH_NATIVE__=true;globalThis.__WAVELENGTH_AUDIO_SERVICE__={service_base};</script><script>{browser_script}</script>",
         ))
@@ -275,12 +320,7 @@ pub fn run(app: fn() -> Element) {
             responder.respond(audio_protocol_response(request));
         })
         .with_window(
-            WindowBuilder::new()
-                .with_title("Wavelength")
-                .with_window_icon(window_icon)
-                .with_inner_size(LogicalSize::new(width, height))
-                .with_min_inner_size(LogicalSize::new(750.0, 600.0))
-                .with_decorations(false),
+            window_builder,
         )
         .with_on_window(move |window, _| {
             if let Ok(mut slot) = window_slot.lock() {
@@ -1022,13 +1062,7 @@ pub fn saved_download_folder_name() -> Result<Option<String>, String> {
     let Some(path) = settings_string("downloadDirectory")? else {
         return Ok(None);
     };
-    let path = PathBuf::from(path);
-    Ok(Some(
-        path.file_name()
-            .unwrap_or(path.as_os_str())
-            .to_string_lossy()
-            .to_string(),
-    ))
+    Ok(Some(path))
 }
 
 pub async fn choose_download_folder() -> Result<Option<String>, String> {
@@ -1044,13 +1078,7 @@ pub async fn choose_download_folder() -> Result<Option<String>, String> {
         "downloadDirectory",
         Value::String(canonical.to_string_lossy().to_string()),
     )?;
-    Ok(Some(
-        canonical
-            .file_name()
-            .unwrap_or(canonical.as_os_str())
-            .to_string_lossy()
-            .to_string(),
-    ))
+    Ok(Some(canonical.to_string_lossy().to_string()))
 }
 
 fn selected_download_directory() -> Result<PathBuf, String> {
@@ -1100,6 +1128,9 @@ fn audio_extension(content_type: &str) -> &'static str {
         "audio/mp4" => "m4a",
         "audio/wav" | "audio/x-wav" => "wav",
         "audio/ogg" => "ogg",
+        "audio/aac" => "aac",
+        "audio/aiff" => "aiff",
+        "audio/x-ms-wma" => "wma",
         "audio/webm" => "webm",
         _ => "audio",
     }
@@ -1132,8 +1163,11 @@ pub async fn download(id: &str, filename: &str, format: &str) -> Result<String, 
     {
         return Err("This track has an invalid download ID.".to_string());
     }
-    if !matches!(format, "flac" | "mp3") {
-        return Err("Choose FLAC or MP3 as the download format in Settings.".to_string());
+    if !matches!(
+        format,
+        "flac" | "mp3" | "wav" | "m4a" | "aac" | "ogg" | "opus" | "aiff" | "wma" | "webm"
+    ) {
+        return Err("Choose a supported music format in Settings.".to_string());
     }
     let directory = selected_download_directory()?;
     let base = safe_filename(filename)?;

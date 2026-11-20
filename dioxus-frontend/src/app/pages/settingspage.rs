@@ -1,7 +1,7 @@
-use super::super::AppState;
+use super::super::{AppState, display_download_folder_path};
 use super::PageData;
 use crate::browser;
-use crate::components::CustomSelect;
+use crate::components::{CustomSelect, Icon};
 use crate::*;
 use dioxus::prelude::*;
 
@@ -14,7 +14,9 @@ pub(super) fn SettingsPage(data: std::rc::Rc<PageData>) -> Element {
         .is_some_and(|profile| profile.images.iter().any(|image| !image.url.is_empty()));
     let font_scale = (app_state.font_scale)();
     let font_scale_percent = (font_scale * 100.0).round() as u32;
+    let interface_zoom_percent = ((app_state.interface_zoom)() * 100.0).round() as u32;
     let download_folder_name = (app_state.download_folder_name)();
+    let download_folder_display_name = display_download_folder_path(&download_folder_name);
     let download_format = (app_state.download_format)();
     let app_version = format!(
         "Version {} · {}",
@@ -51,33 +53,8 @@ pub(super) fn SettingsPage(data: std::rc::Rc<PageData>) -> Element {
                                 }
                             }
                             div { class: "settings-row-actions",
-                                button { class: "outline-button compact-action", onclick: move |_| {
-                                    spawn(async move {
-                                        match browser::choose_avatar().await {
-                                            Ok(Some(image)) => {
-                                                app_state.local_avatar.set(Some(image.clone()));
-                                                save_saved("wavelength-avatar", &Some(image), app_state.notice);
-                                            }
-                                            Ok(None) => {}
-                                            Err(error) => app_state.notice.set(error),
-                                        }
-                                    });
-                                }, "Choose from device" }
-                                if has_spotify_photo {
-                                    button { class: "text-button", onclick: move |_| {
-                                        if (app_state.local_avatar)().is_some() {
-                                            app_state.local_avatar.set(None);
-                                            save_saved("wavelength-avatar", &Option::<String>::None, app_state.notice);
-                                        }
-                                    },
-                                        disabled: (app_state.local_avatar)().is_none(),
-                                        if (app_state.local_avatar)().is_some() { "Use Spotify photo" } else { "Using Spotify photo" }
-                                    }
-                                } else if (app_state.local_avatar)().is_some() {
-                                    button { class: "text-button", onclick: move |_| {
-                                        app_state.local_avatar.set(None);
-                                        save_saved("wavelength-avatar", &Option::<String>::None, app_state.notice);
-                                    }, "Remove photo" }
+                                button { class: "outline-button compact-action", onclick: move |_| app_state.profile_picture_open.set(true),
+                                    "Set profile picture"
                                 }
                             }
                         }
@@ -160,18 +137,13 @@ pub(super) fn SettingsPage(data: std::rc::Rc<PageData>) -> Element {
                         div { class: "settings-row",
                             div { class: "settings-row-copy",
                                 strong { "Download folder" }
-                                small { "Choose where downloaded tracks are saved" }
+                                if download_folder_name.is_empty() {
+                                    small { "Choose where downloaded tracks are saved" }
+                                } else {
+                                    small { class: "download-folder-path", "{download_folder_display_name}" }
+                                }
                             }
                             div { class: "settings-row-actions download-folder-actions",
-                                if download_folder_name.is_empty() {
-                                    span { class: "settings-nav-summary", "Browser default" }
-                                } else {
-                                    span {
-                                        class: "settings-nav-summary",
-                                        title: "{download_folder_name}",
-                                        "{download_folder_name}"
-                                    }
-                                }
                                 div { class: "download-folder-controls",
                                     button {
                                         class: "outline-button compact-action",
@@ -205,6 +177,14 @@ pub(super) fn SettingsPage(data: std::rc::Rc<PageData>) -> Element {
                                     options: vec![
                                         ("flac".to_string(), "FLAC".to_string()),
                                         ("mp3".to_string(), "MP3".to_string()),
+                                        ("wav".to_string(), "WAV".to_string()),
+                                        ("m4a".to_string(), "M4A".to_string()),
+                                        ("aac".to_string(), "AAC".to_string()),
+                                        ("ogg".to_string(), "OGG".to_string()),
+                                        ("opus".to_string(), "Opus".to_string()),
+                                        ("aiff".to_string(), "AIFF".to_string()),
+                                        ("wma".to_string(), "WMA".to_string()),
+                                        ("webm".to_string(), "WebM".to_string()),
                                     ],
                                     aria_label: "Download format",
                                     class_name: "download-format-select",
@@ -236,7 +216,10 @@ pub(super) fn SettingsPage(data: std::rc::Rc<PageData>) -> Element {
                         }
                         div { class: "settings-row",
                             div { class: "settings-row-copy",
-                                strong { "Text size" }
+                                div { class: "settings-row-title",
+                                    strong { "Text size" }
+                                    span { class: "settings-row-value", aria_live: "polite", "{font_scale_percent}%" }
+                                }
                                 small { "Adjust text size without changing the layout scale" }
                             }
                             div { class: "settings-row-actions text-scale-controls", role: "group", aria_label: "Text size",
@@ -246,25 +229,75 @@ pub(super) fn SettingsPage(data: std::rc::Rc<PageData>) -> Element {
                                     title: "Decrease text size",
                                     disabled: font_scale <= 0.8,
                                     onclick: move |_| set_accessibility_font_scale(app_state.font_scale, font_scale - 0.1, app_state.notice),
-                                    "A-"
+                                    Icon { name: "minus" }
                                 }
-                                span { class: "text-scale-value", aria_live: "polite", "{font_scale_percent}%" }
+                                button {
+                                    class: "outline-button compact-action text-scale-button",
+                                    aria_label: "Reset text size",
+                                    title: "Reset text size",
+                                    disabled: font_scale == 1.0,
+                                    onclick: move |_| set_accessibility_font_scale(app_state.font_scale, 1.0, app_state.notice),
+                                    Icon { name: "refresh" }
+                                }
                                 button {
                                     class: "outline-button compact-action text-scale-button",
                                     aria_label: "Increase text size",
                                     title: "Increase text size",
                                     disabled: font_scale >= 1.3,
                                     onclick: move |_| set_accessibility_font_scale(app_state.font_scale, font_scale + 0.1, app_state.notice),
-                                    "A+"
+                                    Icon { name: "plus" }
                                 }
                             }
                         }
                         div { class: "settings-row",
                             div { class: "settings-row-copy",
-                                strong { "Interface zoom" }
-                                small { "Use Ctrl/Command + plus or minus to zoom; Ctrl/Command + 0 resets" }
+                                div { class: "settings-row-title",
+                                    strong { "Interface zoom" }
+                                    span { class: "settings-row-value", aria_live: "polite", "{interface_zoom_percent}%" }
+                                }
+                                small { "Adjust the size of the app interface" }
                             }
-                            span { class: "settings-nav-summary", "70%-150%" }
+                            div { class: "settings-row-actions text-scale-controls", role: "group", aria_label: "Interface zoom",
+                                button {
+                                    class: "outline-button compact-action text-scale-button",
+                                    aria_label: "Decrease interface zoom",
+                                    disabled: (app_state.interface_zoom)() <= 0.7,
+                                    onclick: move |_| {
+                                        let next = (((app_state.interface_zoom)() - 0.1) * 10.0).round() / 10.0;
+                                        let next = next.clamp(0.7, 1.5);
+                                        app_state.interface_zoom.set(next);
+                                        if let Err(error) = browser::set_interface_zoom(next) {
+                                            app_state.notice.set(error);
+                                        }
+                                    },
+                                    Icon { name: "minus" }
+                                }
+                                button {
+                                    class: "outline-button compact-action text-scale-button",
+                                    aria_label: "Reset interface zoom",
+                                    onclick: move |_| {
+                                        app_state.interface_zoom.set(1.0);
+                                        if let Err(error) = browser::set_interface_zoom(1.0) {
+                                            app_state.notice.set(error);
+                                        }
+                                    },
+                                    Icon { name: "refresh" }
+                                }
+                                button {
+                                    class: "outline-button compact-action text-scale-button",
+                                    aria_label: "Increase interface zoom",
+                                    disabled: (app_state.interface_zoom)() >= 1.5,
+                                    onclick: move |_| {
+                                        let next = (((app_state.interface_zoom)() + 0.1) * 10.0).round() / 10.0;
+                                        let next = next.clamp(0.7, 1.5);
+                                        app_state.interface_zoom.set(next);
+                                        if let Err(error) = browser::set_interface_zoom(next) {
+                                            app_state.notice.set(error);
+                                        }
+                                    },
+                                    Icon { name: "plus" }
+                                }
+                            }
                         }
                     }
                 }

@@ -676,9 +676,37 @@ fn matches_download_filter(
 #[cfg(test)]
 mod download_filter_tests {
     use super::{
-        DownloadFilter, DownloadStatus, Playlist, RoomSharedPlaylist, SpotifyPlaylist, Track,
-        library_playlist_count, matches_download_filter,
+        DownloadFilter, DownloadStatus, Playlist, RoomSharedPlaylist, SpotifyPlaylist,
+        SpotifyProfile, Track, library_playlist_count, matches_download_filter,
+        spotify_playlist_is_owned,
     };
+
+    #[test]
+    fn spotify_playlist_editing_requires_matching_owner() {
+        let profile = SpotifyProfile {
+            id: "user-1".to_string(),
+            ..SpotifyProfile::default()
+        };
+        let owned = SpotifyPlaylist {
+            id: "owned".to_string(),
+            owner_id: "user-1".to_string(),
+            ..SpotifyPlaylist::default()
+        };
+        let shared = SpotifyPlaylist {
+            id: "shared".to_string(),
+            owner_id: "other-user".to_string(),
+            ..SpotifyPlaylist::default()
+        };
+        let unknown_owner = SpotifyPlaylist {
+            id: "unknown".to_string(),
+            ..SpotifyPlaylist::default()
+        };
+
+        assert!(spotify_playlist_is_owned(Some(&profile), &owned));
+        assert!(!spotify_playlist_is_owned(Some(&profile), &shared));
+        assert!(!spotify_playlist_is_owned(Some(&profile), &unknown_owner));
+        assert!(!spotify_playlist_is_owned(None, &owned));
+    }
 
     #[test]
     fn downloaded_filter_treats_local_tracks_as_available() {
@@ -985,6 +1013,18 @@ struct SpotifyPlaylist {
     tracks_total: usize,
     #[serde(default)]
     thumbnail: Option<String>,
+    #[serde(default)]
+    owner_id: String,
+    #[serde(default)]
+    owner_name: String,
+}
+
+fn spotify_playlist_is_owned(profile: Option<&SpotifyProfile>, playlist: &SpotifyPlaylist) -> bool {
+    profile.is_some_and(|profile| {
+        !profile.id.is_empty()
+            && !playlist.owner_id.is_empty()
+            && playlist.owner_id == profile.id
+    })
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Deserialize, Serialize)]
@@ -2349,7 +2389,6 @@ fn play_track_direct(
                 if let Err(error) = browser::play_source(&url).await {
                     notice.set(error);
                 } else {
-                    playing.set(true);
                     let mut items = history();
                     items.retain(|item| item.key() != track_for_history.key());
                     items.insert(0, track_for_history);
@@ -4542,7 +4581,7 @@ fn save_qobuz_credentials(
             "user_token": user_token,
         });
         match browser::request_json_method::<QobuzSettings>(
-            &format!("{AUDIO_SERVICE}/qobuz/settings"),
+            &format!("{AUDIO_SERVICE}/settings/qobuz"),
             "PUT",
             &body,
         )

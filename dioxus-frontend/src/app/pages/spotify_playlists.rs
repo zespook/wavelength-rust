@@ -63,6 +63,12 @@ pub(super) fn SpotifyPlaylistsPage(data: std::rc::Rc<PageData>) -> Element {
                 let save_selected_id = selected.id.clone();
                 let current_track = (app_state.current)();
                 let is_playing = (app_state.playing)();
+                let can_edit = spotify_playlist_is_owned(
+                    (app_state.spotify_profile)().as_ref(),
+                    &selected,
+                );
+                let owner_label = (!selected.owner_name.is_empty())
+                    .then(|| format!("By {}", selected.owner_name));
 
                 rsx! {
                     CollectionDetailHeader {
@@ -70,19 +76,19 @@ pub(super) fn SpotifyPlaylistsPage(data: std::rc::Rc<PageData>) -> Element {
                         kind: "Spotify playlist".to_string(),
                         tracks: tracks.clone(),
                         track_count,
-                        artist: None,
+                        artist: owner_label,
                         artwork_url: selected.thumbnail.clone(),
                         artwork_class: String::new(),
                         artwork_icon: Some("list"),
                         play_label: "Play playlist".to_string(),
                         extra_action_label: Some("Copy to local playlists".to_string()),
                         extra_action_disabled: tracks_busy,
-                        rename_enabled: true,
+                        rename_enabled: can_edit,
                         rename_editing: rename_editing(),
                         rename_value: rename_name(),
                         rename_busy: (app_state.spotify_playlist_save_busy)(),
                         rename_notice: Some("Name changes will sync to Spotify.".to_string()),
-                        save_action_label: Some("Save track changes".to_string()),
+                        save_action_label: can_edit.then(|| "Save track changes".to_string()),
                         save_action_disabled: (app_state.spotify_playlist_save_busy)() || tracks_busy,
                         download_action_label: Some("Download".to_string()),
                         download_action_disabled: tracks_busy || tracks.is_empty(),
@@ -132,6 +138,10 @@ pub(super) fn SpotifyPlaylistsPage(data: std::rc::Rc<PageData>) -> Element {
                             let id = selected_id.clone();
                             let original_name = selected.name.clone();
                             move |_| {
+                                if !can_edit {
+                                    app_state.notice.set("Only the Spotify playlist owner can rename it.".to_string());
+                                    return;
+                                }
                                 let name = rename_name().trim().to_string();
                                 if name.is_empty() {
                                     app_state.notice.set("Enter a playlist name.".to_string());
@@ -178,6 +188,10 @@ pub(super) fn SpotifyPlaylistsPage(data: std::rc::Rc<PageData>) -> Element {
                             }
                         },
                         on_save_action: move |_| {
+                            if !can_edit {
+                                app_state.notice.set("Only the Spotify playlist owner can edit tracks.".to_string());
+                                return;
+                            }
                             if (app_state.spotify_playlist_save_busy)() || (app_state.spotify_playlist_tracks_busy)() {
                                 return;
                             }

@@ -316,6 +316,23 @@ export function setFontScale(value) {
   document.documentElement.style.setProperty("--font-size-scale", String(scale));
   return true;
 }
+export function setInterfaceZoom(value) {
+  const scale = Number(value);
+  if (!Number.isFinite(scale) || scale < 0.7 || scale > 1.5) {
+    throw new Error("Interface zoom is outside the supported range.");
+  }
+  const nextScale = Math.round(scale * 10) / 10;
+  document.documentElement.style.setProperty("--app-scale", String(nextScale));
+  localStorage.setItem("wavelength-ui-scale", String(nextScale));
+  return true;
+}
+export function getInterfaceZoom() {
+  const saved = localStorage.getItem("wavelength-ui-scale");
+  const scale = saved === null ? 1 : Number(saved);
+  return Number.isFinite(scale) && scale >= 0.7 && scale <= 1.5
+    ? Math.round(scale * 10) / 10
+    : 1;
+}
 export function effectiveTheme(theme) {
   return theme === "system"
     ? (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light")
@@ -559,7 +576,9 @@ export async function spotifyPlaylists() {
         id: playlist.id,
         name: playlist.name || "Untitled playlist",
         tracks_total: playlist.items?.total ?? playlist.tracks?.total ?? 0,
-        thumbnail: spotifyThumbnail(playlist)
+        thumbnail: spotifyThumbnail(playlist),
+        owner_id: playlist.owner?.id || "",
+        owner_name: playlist.owner?.display_name || playlist.owner?.name || ""
       });
     }
     url = data.next;
@@ -601,9 +620,56 @@ export async function spotifyPlaylistTracks(id) {
     const remaining = deadline - Date.now();
     if (remaining <= 0) throw new Error("Loading this Spotify playlist took too long. Try again.");
     const token = await getSpotifyAccessToken();
-    const data = await spotifyRequest(url, {
-      headers: { Authorization: `Bearer ${token}` }
-    }, "Could not load tracks in this Spotify playlist.", remaining);
+    let data;
+    try {
+      data = await spotifyRequest(url, {
+        headers: { Authorization: `Bearer ${token}` }
+      }, "Could not load tracks in this Spotify playlist.", remaining);
+    } catch (error) {
+      const message = String(error?.message || error);
+      if (/^Forbidden$/i.test(message) && /\/items(?:\?|$)/.test(url)) {
+        const fallbackUrl = new URL(url);
+        fallbackUrl.pathname = fallbackUrl.pathname.replace(/\/items$/, "/tracks");
+        url = fallbackUrl.href;
+        visited.clear();
+        continue;
+      }
+      try {
+        const publicUrl = new URL(
+          `${globalThis.__WAVELENGTH_AUDIO_SERVICE__ || "http://127.0.0.1:8787"}/search`
+        );
+        publicUrl.search = new URLSearchParams({
+          q: `https://open.spotify.com/playlist/${encodeURIComponent(id)}`,
+          source: "spotify",
+          limit: "50",
+          offset: "0"
+        });
+        const publicResponse = await fetch(publicUrl);
+        const publicData = await publicResponse.json().catch(() => null);
+        if (publicResponse.ok && publicData && Array.isArray(publicData.results)) {
+          return publicData.results
+            .map(item => {
+              const id = item?.videoId || item?.id || item?.spotifyUrl?.split("/").pop();
+              if (!id) return null;
+              return {
+                id,
+                title: item.title || item.name || "Untitled track",
+                artist: item.artist || "Unknown artist",
+                album: item.album || "",
+                thumbnail: item.thumbnail || null,
+                duration: Number(item.duration) || 0,
+                source: "spotify"
+              };
+            })
+            .filter(track => track);
+        }
+      } catch {
+        // The public fallback cannot recover private or unavailable playlists.
+      }
+      throw new Error(
+        "This Spotify playlist is private or unavailable to your account."
+      );
+    }
     for (const item of data.items || []) {
       const track = spotifyTrack(item);
       if (track) tracks.push(track);
@@ -776,8 +842,8 @@ export function setAudioVolume(value) {
   return true;
 }
 export async function downloadAudio(id, filename, format = "flac") {
-  if (format !== "flac" && format !== "mp3") {
-    throw new Error("Choose FLAC or MP3 as the download format in Settings.");
+  if (!["flac", "mp3", "wav", "m4a", "aac", "ogg", "opus", "aiff", "wma", "webm"].includes(format)) {
+    throw new Error("Choose a supported music format in Settings.");
   }
   const directory = await currentDownloadFolderHandle();
   if (directory) {
@@ -1109,7 +1175,7 @@ export async function requestJsonMethod(url, method, body) {
   const response = await fetch(url, {
     method,
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body)
+    body: typeof body === "string" ? body : JSON.stringify(body)
   });
   let data;
   try {
@@ -1550,7 +1616,10 @@ export function startEqualizerVisualization(canvasId, selectedBand) {
     context.setTransform(ratio, 0, 0, ratio, 0, 0);
     context.clearRect(0, 0, bounds.width, bounds.height);
     const style = getComputedStyle(document.documentElement);
-    const accent = style.getPropertyValue("--lime").trim() || "#d7e98b";
+    const canvasStyle = getComputedStyle(canvas);
+    const accent = canvasStyle.getPropertyValue("--equalizer-accent").trim()
+      || style.getPropertyValue("--lime").trim()
+      || "#d7e98b";
     const muted = style.getPropertyValue("--muted").trim() || "#9da196";
     const line = style.getPropertyValue("--line").trim() || "rgba(237, 240, 232, .11)";
     const plot = {
@@ -1723,4 +1792,4 @@ export function equalizerCanvasSize() {
 }
 
 
-globalThis.__WAVELENGTH_BROWSER__ = { getLocal, setLocal, removeLocal, installHoverMarquee, watchNarrowWindow, chooseAvatar, getRoomInviteCode, copyRoomCode, copyRoomInvite, setAppearance, isDesktopWindow, checkForUpdates, installUpdate, windowAction, installAppBehaviors, setFontScale, effectiveTheme, startRailResize, searchAudio, restoreSpotify, spotifyLibrary, spotifyPlaylists, spotifyAlbums, spotifyPlaylistTracks, spotifyAlbumTracks, renameSpotifyPlaylist, saveSpotifyPlaylist, createSpotifyPlaylist, connectSpotify, disconnectSpotify, setSpotifyRefreshToken, getSpotifyRefreshToken, playAudio, playAudioSource, pauseAudio, seekAudio, readAudioTime, setAudioVolume, downloadAudio, preloadAudio, savedDownloadFolderName, chooseDownloadFolder, savedLibraryFolders, removeSavedLibraryFolder, scanLibrary, chooseFolder, localUrl, roomRequest, requestJson, requestJsonMethod, fetchLyrics, scrollActiveLyricIntoView, scrollContentToTop, connectRoomSocket, disconnectRoomSocket, emitRoomCommand, emitRoomPlaybackControl, emitRoomPlaybackProgress, emitRoomHostState, drainRoomEvents, uploadRoomTrack, hasLocalAudioFile, roomAudioUrl, openExternalTrack, setEqualizer, startEqualizerVisualization, setEqualizerSelectedBand, setEqualizerPreview, clearEqualizerPreview, equalizerCanvasSize };
+globalThis.__WAVELENGTH_BROWSER__ = { getLocal, setLocal, removeLocal, installHoverMarquee, watchNarrowWindow, chooseAvatar, getRoomInviteCode, copyRoomCode, copyRoomInvite, setAppearance, isDesktopWindow, checkForUpdates, installUpdate, windowAction, installAppBehaviors, setFontScale, setInterfaceZoom, getInterfaceZoom, effectiveTheme, startRailResize, searchAudio, restoreSpotify, spotifyLibrary, spotifyPlaylists, spotifyAlbums, spotifyPlaylistTracks, spotifyAlbumTracks, renameSpotifyPlaylist, saveSpotifyPlaylist, createSpotifyPlaylist, connectSpotify, disconnectSpotify, setSpotifyRefreshToken, getSpotifyRefreshToken, playAudio, playAudioSource, pauseAudio, seekAudio, readAudioTime, setAudioVolume, downloadAudio, preloadAudio, savedDownloadFolderName, chooseDownloadFolder, savedLibraryFolders, removeSavedLibraryFolder, scanLibrary, chooseFolder, localUrl, roomRequest, requestJson, requestJsonMethod, fetchLyrics, scrollActiveLyricIntoView, scrollContentToTop, connectRoomSocket, disconnectRoomSocket, emitRoomCommand, emitRoomPlaybackControl, emitRoomPlaybackProgress, emitRoomHostState, drainRoomEvents, uploadRoomTrack, hasLocalAudioFile, roomAudioUrl, openExternalTrack, setEqualizer, startEqualizerVisualization, setEqualizerSelectedBand, setEqualizerPreview, clearEqualizerPreview, equalizerCanvasSize };

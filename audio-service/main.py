@@ -572,12 +572,12 @@ class QobuzCredentials(BaseModel):
     user_token: str
 
 
-@app.get("/qobuz/settings")
+@app.get("/settings/qobuz")
 async def get_qobuz_settings():
     return {"configured": bool(_qobuz_credentials)}
 
 
-@app.put("/qobuz/settings")
+@app.put("/settings/qobuz")
 async def set_qobuz_settings(credentials: QobuzCredentials):
     app_id = credentials.app_id.strip()
     app_secret = credentials.app_secret.strip()

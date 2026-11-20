@@ -47,9 +47,6 @@ pub(super) fn LibraryPage(data: std::rc::Rc<PageData>) -> Element {
                 }
             }
             if (app_state.library_sort)() == "folders" {
-                if library_folder_rows.is_empty() {
-                    p { class: "library-empty", "Choose a music folder to import local tracks" }
-                }
                 for folder in library_folder_rows.clone() {
                     {
                         let folder_path = folder.path.clone();
@@ -109,7 +106,6 @@ pub(super) fn LibraryPage(data: std::rc::Rc<PageData>) -> Element {
                     }
                 }
             } else {
-                if library_groups.is_empty() { p { class: "library-empty", "Choose a music folder to import local tracks" } }
                 for (group_index, (name, tracks)) in library_groups.clone().into_iter().enumerate() {
                     {
                         let group_key = format!("{}:{name}", (app_state.library_sort)());

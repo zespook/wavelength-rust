@@ -5,11 +5,11 @@ import { fileURLToPath } from "node:url";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const dioxusFrontend = join(root, "dioxus-frontend");
-const manifest = readFileSync(join(dioxusFrontend, "Cargo.toml"), "utf8");
-const packageName = manifest.match(/^name\s*=\s*"([^"]+)"/m)?.[1];
+const dioxusConfig = readFileSync(join(dioxusFrontend, "Dioxus.toml"), "utf8");
+const applicationName = dioxusConfig.match(/^name\s*=\s*"([^"]+)"/m)?.[1];
 
-if (!packageName) {
-  throw new Error("Could not read the Dioxus package name from Cargo.toml.");
+if (!applicationName) {
+  throw new Error("Could not read the Dioxus application name from Dioxus.toml.");
 }
 
 const dx = process.platform === "win32" ? "dx.exe" : "dx";
@@ -29,7 +29,7 @@ const buildOutput = join(
   dioxusFrontend,
   "target",
   "dx",
-  packageName,
+  applicationName,
   "release",
   "web",
   "public",

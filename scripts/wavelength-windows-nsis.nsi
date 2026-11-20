@@ -1,6 +1,11 @@
 !include "MUI2.nsh"
 !include "FileFunc.nsh"
 !include "x64.nsh"
+!include "nsDialogs.nsh"
+!include "LogicLib.nsh"
+
+Var DeleteStoredAppData
+Var DeleteStoredAppDataCheckbox
 
 ; Basic installer attributes
 Name "{{product_name}}"
@@ -58,6 +63,7 @@ VIAddVersionKey "LegalCopyright" "{{copyright}}"
 !insertmacro MUI_PAGE_FINISH
 
 ; Uninstaller pages
+UninstPage custom un.DeleteStoredAppDataPageCreate un.DeleteStoredAppDataPageLeave
 !insertmacro MUI_UNPAGE_CONFIRM
 !insertmacro MUI_UNPAGE_INSTFILES
 
@@ -66,6 +72,27 @@ VIAddVersionKey "LegalCopyright" "{{copyright}}"
 {{#each additional_languages}}
 !insertmacro MUI_LANGUAGE "{{this}}"
 {{/each}}
+
+Function un.DeleteStoredAppDataPageCreate
+    nsDialogs::Create 1018
+    Pop $0
+    ${If} $0 == error
+        Abort
+    ${EndIf}
+
+    ${NSD_CreateCheckbox} 0 0 100% 12u "Delete all stored Wavelength app data"
+    Pop $DeleteStoredAppDataCheckbox
+    ${NSD_CreateLabel} 0 20u 100% 32u "Removes saved settings, playlists, favorites, Spotify sign-in, and local library data. Downloaded music in folders you selected is not deleted."
+    Pop $0
+    nsDialogs::Show
+FunctionEnd
+
+Function un.DeleteStoredAppDataPageLeave
+    StrCpy $DeleteStoredAppData 0
+    ${NSD_GetState} $DeleteStoredAppDataCheckbox $0
+    StrCmp $0 ${BST_CHECKED} 0 +2
+    StrCpy $DeleteStoredAppData 1
+FunctionEnd
 
 ; Installer section
 Section "Install"
@@ -137,4 +164,14 @@ Section "Uninstall"
 
     ; Remove registry keys
     DeleteRegKey SHCTX "Software\Microsoft\Windows\CurrentVersion\Uninstall\{{bundle_id}}"
+
+    ${If} $DeleteStoredAppData == 1
+        ExecWait '"$INSTDIR\{{main_binary_name}}" --delete-app-data'
+        RMDir /r "$APPDATA\Wavelength\Wavelength"
+        RMDir /r "$LOCALAPPDATA\Wavelength\Wavelength"
+        RMDir /r "$APPDATA\com\Wavelength\Wavelength"
+        RMDir /r "$APPDATA\Wavelength"
+        RMDir /r "$LOCALAPPDATA\com\Wavelength\Wavelength"
+        RMDir /r "$LOCALAPPDATA\Wavelength"
+    ${EndIf}
 SectionEnd

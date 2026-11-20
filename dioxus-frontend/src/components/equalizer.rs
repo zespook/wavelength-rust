@@ -148,10 +148,42 @@ pub(crate) fn EqualizerPage(notice: Signal<String>) -> Element {
     rsx! {
         section { class: "equalizer-page",
             header { class: "equalizer-page-heading",
-                h1 { "Equalizer" }
-                p { "Shape playback across ten parametric bands" }
+                div { class: "equalizer-heading-copy",
+                    h1 { "Equalizer" }
+                    p { "Shape playback across ten parametric bands" }
+                }
+                button {
+                    class: if equalizer_enabled() { "equalizer-switch active" } else { "equalizer-switch" },
+                    r#type: "button",
+                    role: "switch",
+                    aria_label: if equalizer_enabled() { "Disable equalizer" } else { "Enable equalizer" },
+                    aria_pressed: equalizer_enabled(),
+                    disabled: unavailable(),
+                    onclick: move |_| {
+                        let enabled = !equalizer_enabled();
+                        equalizer_enabled.set(enabled);
+                        unavailable.set(
+                            set_equalizer_state(
+                                &gains(),
+                                &frequencies(),
+                                &qs(),
+                                &types(),
+                                enabled,
+                                notice,
+                            )
+                            .is_err(),
+                        );
+                        if let Err(error) = browser::save("wavelength-equalizer-enabled", &enabled) {
+                            notice.set(error);
+                        }
+                    },
+                    span { class: "equalizer-switch-track", aria_hidden: "true",
+                        span { class: "equalizer-switch-thumb" }
+                    }
+                }
             }
-            div { class: "equalizer-workbench",
+            div {
+                class: if equalizer_enabled() { "equalizer-workbench" } else { "equalizer-workbench is-disabled" },
                 div { class: "equalizer-toolbar",
                     div { class: "equalizer-preset-section",
                         label { class: "equalizer-preset-control",
@@ -231,33 +263,6 @@ pub(crate) fn EqualizerPage(notice: Signal<String>) -> Element {
                             }
                         }
                         div { class: "equalizer-toolbar-actions",
-                            button {
-                                class: "outline-button compact-action equalizer-toggle",
-                                r#type: "button",
-                                aria_label: "Equalizer",
-                                aria_pressed: equalizer_enabled(),
-                                disabled: unavailable(),
-                                onclick: move |_| {
-                                    let enabled = !equalizer_enabled();
-                                    equalizer_enabled.set(enabled);
-                                    unavailable.set(
-                                        set_equalizer_state(
-                                            &gains(),
-                                            &frequencies(),
-                                            &qs(),
-                                            &types(),
-                                            enabled,
-                                            notice,
-                                        )
-                                        .is_err(),
-                                    );
-                                    if let Err(error) = browser::save("wavelength-equalizer-enabled", &enabled) {
-                                        notice.set(error);
-                                    }
-                                },
-                                span { "Equalizer" }
-                                span { if equalizer_enabled() { "On" } else { "Off" } }
-                            }
                             button { class: "outline-button compact-action", disabled: unavailable(), onclick: move |_| {
                             placement_band.set(None);
                             if let Err(error) = browser::clear_equalizer_preview() {

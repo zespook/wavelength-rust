@@ -1,8 +1,12 @@
 use crate::browser;
-use crate::components::{AppNotice, Icon, QueueDownloadIndicator, UpdateNotice};
+use crate::components::{AppNotice, CustomSelect, Icon, QueueDownloadIndicator, UpdateNotice};
 use crate::*;
 use dioxus::html::{input_data::MouseButton, point_interaction::PointerInteraction};
 use dioxus::prelude::*;
+
+fn display_download_folder_path(path: &str) -> &str {
+    path.strip_prefix("\\\\?\\").unwrap_or(path)
+}
 
 fn displayed_lyric_index(
     follow_playback: bool,
@@ -18,7 +22,19 @@ fn displayed_lyric_index(
 
 #[cfg(test)]
 mod tests {
-    use super::displayed_lyric_index;
+    use super::{display_download_folder_path, displayed_lyric_index};
+
+    #[test]
+    fn download_folder_display_strips_extended_windows_path_prefix() {
+        assert_eq!(
+            display_download_folder_path("\\\\?\\F:\\Wavelength Downloads"),
+            "F:\\Wavelength Downloads"
+        );
+        assert_eq!(
+            display_download_folder_path("F:\\Wavelength Downloads"),
+            "F:\\Wavelength Downloads"
+        );
+    }
 
     #[test]
     fn lyrics_sync_off_keeps_the_last_active_line() {
@@ -31,8 +47,21 @@ mod tests {
 #[component]
 fn TopbarSearchResult(track: Track, prefer_local_copy: bool) -> Element {
     let mut app_state = use_context::<AppState>();
+    let context_track = track.clone();
+    let queue_track = track.clone();
+    let play_target = track.clone();
     rsx! {
-        div { class: "topbar-search-result",
+        div {
+            class: "topbar-search-result",
+            oncontextmenu: move |event| {
+                event.prevent_default();
+                let position = event.client_coordinates();
+                app_state.context_track.set(Some(TrackContextMenu {
+                    track: context_track.clone(),
+                    x: position.x,
+                    y: position.y,
+                }));
+            },
             span { class: "mini-art",
                 if let Some(thumbnail) = track.thumbnail.as_deref() {
                     img { src: "{thumbnail}", alt: "" }
@@ -46,16 +75,33 @@ fn TopbarSearchResult(track: Track, prefer_local_copy: bool) -> Element {
             }
             span { class: "topbar-search-length", "{track.duration_label()}" }
             button {
+                class: "icon-button topbar-search-queue",
+                r#type: "button",
+                aria_label: "Add {track.title} to queue",
+                title: "Add to queue",
+                onmousedown: move |event| event.stop_propagation(),
+                onclick: move |_| {
+                    let track = if prefer_local_copy && (app_state.room_code)().is_empty() {
+                        preferred_local_track(queue_track.clone(), &(app_state.local_tracks)())
+                    } else {
+                        queue_track.clone()
+                    };
+                    add_to_queue(track, app_state.queue, app_state.notice);
+                },
+                Icon { name: "list" }
+            }
+            button {
                 class: "icon-button topbar-search-play",
                 r#type: "button",
                 aria_label: "Play {track.title}",
                 title: "Play now",
+                onmousedown: move |event| event.stop_propagation(),
                 onclick: move |_| {
                     app_state.topbar_search_open.set(false);
                     let track = if prefer_local_copy && (app_state.room_code)().is_empty() {
-                        preferred_local_track(track.clone(), &(app_state.local_tracks)())
+                        preferred_local_track(play_target.clone(), &(app_state.local_tracks)())
                     } else {
-                        track.clone()
+                        play_target.clone()
                     };
                     play_track(track, app_state.current, app_state.audio_src, app_state.playing, app_state.queue, app_state.history, app_state.notice);
                 },
@@ -128,6 +174,9 @@ struct AppState {
     folder_manager_open: Signal<bool>,
     saved_folder_names: Signal<Vec<String>>,
     download_folder_name: Signal<String>,
+    setup_wizard_open: Signal<bool>,
+    profile_picture_open: Signal<bool>,
+    interface_zoom: Signal<f64>,
     download_format: Signal<String>,
     context_track: Signal<Option<TrackContextMenu>>,
     context_playlist: Signal<Option<PlaylistContextMenu>>,
@@ -279,7 +328,10 @@ pub(crate) fn App() -> Element {
     let mut folder_manager_open = use_signal(|| false);
     let mut saved_folder_names = use_signal(Vec::<String>::new);
     let download_folder_name = use_signal(String::new);
-    let download_format = use_signal(|| "flac".to_string());
+    let mut setup_wizard_open = use_signal(|| false);
+    let mut profile_picture_open = use_signal(|| false);
+    let mut interface_zoom = use_signal(|| 1.0f64);
+    let mut download_format = use_signal(|| "flac".to_string());
     let mut context_track = use_signal(|| Option::<TrackContextMenu>::None);
     let mut context_playlist = use_signal(|| Option::<PlaylistContextMenu>::None);
     let mut detail_track = use_signal(|| Option::<Track>::None);
@@ -291,7 +343,7 @@ pub(crate) fn App() -> Element {
     let previous_volume = use_signal(|| 0.3f64);
     let current = use_signal(|| Option::<Track>::None);
     let audio_src = use_signal(String::new);
-    let playing = use_signal(|| false);
+    let mut playing = use_signal(|| false);
     let mut lyrics = use_signal(String::new);
     let mut lyric_lines = use_signal(Vec::<LyricLine>::new);
     let mut lyric_loading = use_signal(|| false);
@@ -314,16 +366,16 @@ pub(crate) fn App() -> Element {
     let activity_tab = use_signal(|| "downloads".to_string());
     let notification_logs = use_signal(Vec::<NotificationLog>::new);
     let mut spotify_profile = use_signal(|| Option::<SpotifyProfile>::None);
-    let local_avatar = use_signal(|| Option::<String>::None);
+    let mut local_avatar = use_signal(|| Option::<String>::None);
     let library_query = use_signal(String::new);
     let library_sort = use_signal(|| "folders".to_string());
     let expanded_library_folders = use_signal(Vec::<String>::new);
     let collapsed_library_groups = use_signal(Vec::<String>::new);
-    let theme = use_signal(|| "dark".to_string());
+    let mut theme = use_signal(|| "dark".to_string());
     let mut accent = use_signal(|| "#d7c7a4".to_string());
     let mut accent_preset = use_signal(String::new);
     let mut effective_appearance_theme = use_signal(|| "dark".to_string());
-    let background_color = use_signal(String::new);
+    let mut background_color = use_signal(String::new);
     let font_scale = use_signal(|| 1.0f64);
     let mut background_hex_input = use_signal(|| default_background_color("dark").to_string());
     let background_hex_error = use_signal(String::new);
@@ -421,6 +473,9 @@ pub(crate) fn App() -> Element {
         folder_manager_open,
         saved_folder_names,
         download_folder_name,
+        setup_wizard_open,
+        profile_picture_open,
+        interface_zoom,
         download_format,
         context_track,
         context_playlist,
@@ -762,6 +817,59 @@ pub(crate) fn App() -> Element {
         load_saved("wavelength-accent-preset", accent_preset, notice);
         load_saved("wavelength-background-color", background_color, notice);
         load_saved("wavelength-download-format", download_format, notice);
+        setup_wizard_open.set(false);
+        let mut setup_open = setup_wizard_open;
+        let existing_playlists = playlists();
+        let existing_favorites = favorites();
+        let existing_history = history();
+        let existing_queue = queue();
+        let existing_room_url = room_url();
+        let existing_theme = theme();
+        let existing_accent = accent();
+        let existing_background = background_color();
+        let existing_download_format = download_format();
+        spawn(async move {
+            let setup_complete = matches!(
+                browser::load::<bool>("wavelength-setup-complete"),
+                Ok(Some(true))
+            );
+            let saved_theme = browser::load::<String>("wavelength-theme")
+                .ok()
+                .flatten();
+            let saved_accent = browser::load::<String>("wavelength-accent")
+                .ok()
+                .flatten();
+            let saved_background = browser::load::<String>("wavelength-background-color")
+                .ok()
+                .flatten();
+            let saved_font_scale = browser::load::<f64>("wavelength-font-scale")
+                .ok()
+                .flatten();
+            let saved_download_format = browser::load::<String>("wavelength-download-format")
+                .ok()
+                .flatten();
+            let saved_download_folder = browser::saved_download_folder_name()
+                .await
+                .ok()
+                .flatten()
+                .is_some();
+            let meaningful_existing_data = !existing_playlists.is_empty()
+                || !existing_favorites.is_empty()
+                || !existing_history.is_empty()
+                || !existing_queue.is_empty()
+                || saved_download_folder
+                || !existing_room_url.trim().is_empty()
+                || saved_theme.is_some_and(|value| value != "dark")
+                || saved_accent.is_some()
+                || saved_background.is_some_and(|value| !value.is_empty())
+                || saved_font_scale.is_some_and(|value| (value - 1.0).abs() > f64::EPSILON)
+                || saved_download_format.is_some_and(|value| value != "flac")
+                || existing_theme != "dark"
+                || existing_accent != "#d7c7a4"
+                || !existing_background.is_empty()
+                || existing_download_format != "flac";
+            setup_open.set(!setup_complete && !meaningful_existing_data);
+        });
         load_accessibility_font_scale(font_scale, notice);
         load_saved("wavelength-volume", volume, notice);
         load_saved("wavelength-previous-volume", previous_volume, notice);
@@ -892,7 +1000,12 @@ pub(crate) fn App() -> Element {
         }
         spawn(async move {
             match browser::scan_library().await {
-                Ok(tracks) => local_tracks.set(tracks),
+                Ok(tracks) => {
+                    if !tracks.is_empty() {
+                        setup_wizard_open.set(false);
+                    }
+                    local_tracks.set(tracks);
+                }
                 Err(error) => notice.set(error),
             }
         });
@@ -904,6 +1017,7 @@ pub(crate) fn App() -> Element {
                         notice.set("Spotify connected.".to_string());
                     }
                     spotify_profile.set(Some(restore.profile));
+                    setup_wizard_open.set(false);
                 }
                 Ok(None) => {}
                 Err(error) => notice.set(error),
@@ -1077,6 +1191,17 @@ pub(crate) fn App() -> Element {
     });
 
     use_effect(move || {
+        let mut scale = interface_zoom;
+        let mut notice = notice;
+        spawn(async move {
+            match browser::get_interface_zoom().await {
+                Ok(value) => scale.set(value),
+                Err(error) => notice.set(error),
+            }
+        });
+    });
+
+    use_effect(move || {
         if !playing() {
             return;
         }
@@ -1097,7 +1222,7 @@ pub(crate) fn App() -> Element {
         }
         qobuz_settings_loaded.set(true);
         spawn(async move {
-            match browser::get_json::<QobuzSettings>(&format!("{AUDIO_SERVICE}/qobuz/settings"))
+            match browser::get_json::<QobuzSettings>(&format!("{AUDIO_SERVICE}/settings/qobuz"))
                 .await
             {
                 Ok(settings) => qobuz_configured.set(settings.configured),
@@ -1264,7 +1389,7 @@ pub(crate) fn App() -> Element {
                 }
             },
             header {
-                class: "topbar",
+                class: if cfg!(target_os = "macos") { "topbar native-macos-titlebar" } else { "topbar" },
                 onmousedown: move |event| {
                     if event.data.trigger_button() == Some(MouseButton::Primary) {
                         browser::drag_window();
@@ -1427,12 +1552,12 @@ pub(crate) fn App() -> Element {
                         }) {
                             img { class: "avatar-photo", src: "{source}", alt: "" }
                         } else {
-                            Icon { name: "user" }
+                            Icon { name: "disc" }
                         }
                     }
-                    if window_controls_available() {
+                    if window_controls_available() && !cfg!(target_os = "macos") {
                         div {
-                            class: "window-controls",
+                            class: "window-controls window-controls-right",
                             role: "group",
                             aria_label: "Window controls",
                             onmousedown: move |event| event.stop_propagation(),
@@ -1451,7 +1576,7 @@ pub(crate) fn App() -> Element {
                                 Icon { name: "minimize" }
                             }
                             button {
-                                class: "window-control",
+                                class: "window-control window-maximize-control",
                                 r#type: "button",
                                 aria_label: "Maximize or restore window",
                                 title: "Maximize or restore",
@@ -1572,7 +1697,7 @@ pub(crate) fn App() -> Element {
                                 }
                                 div { class: "lyrics-header-actions",
                                     button {
-                                        class: if lyrics_follow_playback() { "lyrics-sync-toggle is-active" } else { "lyrics-sync-toggle" },
+                                        class: if lyrics_follow_playback() { "icon-button lyrics-sync-toggle is-active" } else { "icon-button lyrics-sync-toggle" },
                                         r#type: "button",
                                         aria_label: "Sync lyrics with playback",
                                         aria_pressed: lyrics_follow_playback(),
@@ -1587,8 +1712,6 @@ pub(crate) fn App() -> Element {
                                             lyric_scroll_session.set(lyric_scroll_session() + 1);
                                         },
                                         Icon { name: "lyrics" }
-                                        span { "Sync to song" }
-                                        span { class: "lyrics-sync-state", if lyrics_follow_playback() { "On" } else { "Off" } }
                                     }
                                     button {
                                         class: "lyrics-close-button",
@@ -2032,6 +2155,8 @@ pub(crate) fn App() -> Element {
                             }
                         });
                     },
+                    onplaying: move |_| playing.set(true),
+                    onpause: move |_| playing.set(false),
                     onended: move |_| handle_track_ended(
                         current,
                         audio_src,
@@ -2557,6 +2682,315 @@ pub(crate) fn App() -> Element {
                                                         disabled: qobuz_saving(),
                                                         if qobuz_saving() { "Saving" } else { "Save" }
                                                     }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                if setup_wizard_open() {
+                                    div { class: "modal-backdrop setup-wizard-backdrop",
+                                        div { class: "modal setup-wizard", role: "dialog", aria_modal: "true", aria_labelledby: "setup-wizard-title",
+                                            div { class: "folder-modal-heading",
+                                                div { class: "folder-modal-title",
+                                                    h2 { id: "setup-wizard-title", "Set up Wavelength" }
+                                                }
+                                                p { "Choose the essentials now or finish setup later from Settings." }
+                                            }
+                                            div { class: "setup-wizard-options",
+                                                section { class: "setup-wizard-row",
+                                                    div { class: "setup-wizard-copy",
+                                                        strong { "Download folder" }
+                                                        p {
+                                                            if download_folder_name().is_empty() {
+                                                                "No download folder is registered"
+                                                            } else {
+                                                                "Using {display_download_folder_path(&download_folder_name())}"
+                                                            }
+                                                        }
+                                                        small { "A download folder is required to save music from Wavelength." }
+                                                    }
+                                                    button { class: "outline-button compact-action", onclick: move |_| {
+                                                        let mut folder_name = download_folder_name;
+                                                        let mut notice = notice;
+                                                        spawn(async move {
+                                                            match browser::choose_download_folder().await {
+                                                                Ok(Some(name)) => {
+                                                                    folder_name.set(name);
+                                                                    notice.set(String::new());
+                                                                }
+                                                                Ok(None) => {}
+                                                                Err(error) => notice.set(error),
+                                                            }
+                                                        });
+                                                    },
+                                                        if download_folder_name().is_empty() { "Choose folder" } else { "Change folder" }
+                                                    }
+                                                }
+                                                section { class: "setup-wizard-row",
+                                                    div { class: "setup-wizard-copy",
+                                                        strong { "Spotify" }
+                                                        p {
+                                                            if let Some(profile) = spotify_profile() {
+                                                                "Connected as {profile.display_name.as_deref().filter(|name| !name.is_empty()).unwrap_or(&profile.id)}"
+                                                            } else {
+                                                                "Not connected"
+                                                            }
+                                                        }
+                                                        small { "Optional. Connect for Spotify search and library access." }
+                                                    }
+                                                    if spotify_profile().is_some() {
+                                                        button { class: "outline-button compact-action", onclick: move |_| {
+                                                            match browser::disconnect_spotify() {
+                                                                Ok(()) => {
+                                                                    spotify_profile.set(None);
+                                                                    notice.set("Spotify disconnected.".to_string());
+                                                                }
+                                                                Err(error) => notice.set(error),
+                                                            }
+                                                        }, "Disconnect" }
+                                                    } else {
+                                                        button { class: "outline-button compact-action", onclick: move |_| {
+                                                            spawn(async move {
+                                                                match browser::connect_spotify().await {
+                                                                    Ok(()) => match browser::restore_spotify().await {
+                                                                        Ok(Some(restore)) => {
+                                                                            spotify_profile.set(Some(restore.profile));
+                                                                            notice.set("Spotify connected.".to_string());
+                                                                        }
+                                                                        Ok(None) => notice.set("Spotify connected.".to_string()),
+                                                                        Err(error) => notice.set(error),
+                                                                    },
+                                                                    Err(error) => notice.set(error),
+                                                                }
+                                                            });
+                                                        }, "Connect" }
+                                                    }
+                                                }
+                                                section { class: "setup-wizard-row",
+                                                    div { class: "setup-wizard-copy",
+                                                        strong { "Download format" }
+                                                        p { "Choose the default format for new downloads." }
+                                                    }
+                                                    CustomSelect {
+                                                        value: download_format(),
+                                                        options: vec![
+                                                            ("flac".to_string(), "FLAC".to_string()),
+                                                            ("mp3".to_string(), "MP3".to_string()),
+                                                            ("wav".to_string(), "WAV".to_string()),
+                                                            ("m4a".to_string(), "M4A".to_string()),
+                                                            ("aac".to_string(), "AAC".to_string()),
+                                                            ("ogg".to_string(), "OGG".to_string()),
+                                                            ("opus".to_string(), "Opus".to_string()),
+                                                            ("aiff".to_string(), "AIFF".to_string()),
+                                                            ("wma".to_string(), "WMA".to_string()),
+                                                            ("webm".to_string(), "WebM".to_string()),
+                                                        ],
+                                                        aria_label: "Download format",
+                                                        class_name: "setup-wizard-select",
+                                                        on_change: move |value: String| {
+                                                            download_format.set(value.clone());
+                                                            let _ = browser::save("wavelength-download-format", &value);
+                                                        }
+                                                    }
+                                                }
+                                                section { class: "setup-wizard-row",
+                                                    div { class: "setup-wizard-copy",
+                                                        strong { "Theme" }
+                                                        p { "Choose how Wavelength looks." }
+                                                    }
+                                                    CustomSelect {
+                                                        value: theme(),
+                                                        options: vec![
+                                                            ("dark".to_string(), "Dark".to_string()),
+                                                            ("light".to_string(), "Light".to_string()),
+                                                            ("system".to_string(), "System".to_string()),
+                                                        ],
+                                                        aria_label: "Theme",
+                                                        class_name: "setup-wizard-select",
+                                                        on_change: move |value: String| {
+                                                            theme.set(value.clone());
+                                                            let resolved = if value == "system" {
+                                                                browser::effective_theme("system").unwrap_or_else(|_| "dark".to_string())
+                                                            } else {
+                                                                value.clone()
+                                                            };
+                                                            effective_appearance_theme.set(resolved);
+                                                            save_string("wavelength-theme", &value, notice);
+                                                            let _ = browser::set_appearance(&value, &accent(), &background_color());
+                                                        }
+                                                    }
+                                                }
+                                                section { class: "setup-wizard-row",
+                                                    div { class: "setup-wizard-copy",
+                                                        strong { "Accent color" }
+                                                        p { "Pick the interface highlight color." }
+                                                    }
+                                                    CustomSelect {
+                                                        value: accent(),
+                                                        options: vec![
+                                                            ("#d7c7a4".to_string(), "Amber".to_string()),
+                                                            ("#ab947a".to_string(), "Sand".to_string()),
+                                                            ("#58a6a6".to_string(), "Teal".to_string()),
+                                                            ("#6b8cff".to_string(), "Blue".to_string()),
+                                                            ("#b77ac0".to_string(), "Plum".to_string()),
+                                                            ("#f68181".to_string(), "Coral".to_string()),
+                                                        ],
+                                                        aria_label: "Accent color",
+                                                        class_name: "setup-wizard-select",
+                                                        on_change: move |value: String| {
+                                                            accent.set(value.clone());
+                                                            save_string("wavelength-accent", &value, notice);
+                                                            let _ = browser::set_appearance(&theme(), &value, &background_color());
+                                                        }
+                                                    }
+                                                }
+                                                section { class: "setup-wizard-row",
+                                                    div { class: "setup-wizard-copy",
+                                                        strong { "Background" }
+                                                        p { "Choose the page surface color." }
+                                                    }
+                                                    CustomSelect {
+                                                        value: if background_color().is_empty() { "default".to_string() } else { background_color() },
+                                                        options: vec![
+                                                            ("default".to_string(), "Default".to_string()),
+                                                            ("#17191d".to_string(), "Obsidian".to_string()),
+                                                            ("#20242a".to_string(), "Ink".to_string()),
+                                                            ("#2a3038".to_string(), "Slate".to_string()),
+                                                            ("#29251f".to_string(), "Warm".to_string()),
+                                                            ("#1f2925".to_string(), "Forest".to_string()),
+                                                        ],
+                                                        aria_label: "Background color",
+                                                        class_name: "setup-wizard-select",
+                                                        on_change: move |value: String| {
+                                                            let color = if value == "default" { String::new() } else { value };
+                                                            background_color.set(color.clone());
+                                                            save_string("wavelength-background-color", &color, notice);
+                                                            let _ = browser::set_appearance(&theme(), &accent(), &color);
+                                                        }
+                                                    }
+                                                }
+                                                section { class: "setup-wizard-row",
+                                                    div { class: "setup-wizard-copy",
+                                                        strong { "Font size" }
+                                                        p { "{(((font_scale() * 100.0).round()) as u32)}%" }
+                                                    }
+                                                    div { class: "setup-wizard-scale", role: "group", aria_label: "Font size",
+                                                        button { class: "outline-button compact-action", aria_label: "Decrease font size", disabled: font_scale() <= 0.8, onclick: move |_| set_accessibility_font_scale(font_scale, font_scale() - 0.1, notice), "A-" }
+                                                        button { class: "text-button", aria_label: "Reset font size", onclick: move |_| set_accessibility_font_scale(font_scale, 1.0, notice), "Reset" }
+                                                        button { class: "outline-button compact-action", aria_label: "Increase font size", disabled: font_scale() >= 1.3, onclick: move |_| set_accessibility_font_scale(font_scale, font_scale() + 0.1, notice), "A+" }
+                                                    }
+                                                }
+                                                section { class: "setup-wizard-row",
+                                                    div { class: "setup-wizard-copy",
+                                                        strong { "Interface zoom" }
+                                                        p { "{(((interface_zoom() * 100.0).round()) as u32)}%" }
+                                                    }
+                                                    div { class: "setup-wizard-scale", role: "group", aria_label: "Interface zoom",
+                                                        button { class: "outline-button compact-action", aria_label: "Decrease interface zoom", disabled: interface_zoom() <= 0.7, onclick: move |_| {
+                                                            let value = (interface_zoom() - 0.1).clamp(0.7, 1.5);
+                                                            interface_zoom.set(value);
+                                                            let _ = browser::set_interface_zoom(value);
+                                                        }, "−" }
+                                                        button { class: "outline-button compact-action", aria_label: "Reset interface zoom", onclick: move |_| {
+                                                            interface_zoom.set(1.0);
+                                                            let _ = browser::set_interface_zoom(1.0);
+                                                        }, "Reset" }
+                                                        button { class: "outline-button compact-action", aria_label: "Increase interface zoom", disabled: interface_zoom() >= 1.5, onclick: move |_| {
+                                                            let value = (interface_zoom() + 0.1).clamp(0.7, 1.5);
+                                                            interface_zoom.set(value);
+                                                            let _ = browser::set_interface_zoom(value);
+                                                        }, "+" }
+                                                    }
+                                                }
+                                                section { class: "setup-wizard-row",
+                                                    div { class: "setup-wizard-copy",
+                                                        strong { "Local music folder" }
+                                                        p { "Optional. Import your existing music library." }
+                                                    }
+                                                    button { class: "outline-button compact-action", onclick: move |_| {
+                                                        spawn(async move {
+                                                            match browser::choose_folder().await {
+                                                                Ok(Some(tracks)) => {
+                                                                    local_tracks.set(merge_local_tracks(local_tracks(), tracks));
+                                                                    notice.set("Local music folder added.".to_string());
+                                                                }
+                                                                Ok(None) => {}
+                                                                Err(error) => notice.set(error),
+                                                            }
+                                                        });
+                                                    }, "Choose folder" }
+                                                }
+                                            }
+                                            div { class: "setup-wizard-actions",
+                                                button { class: "text-button", onclick: move |_| {
+                                                    setup_wizard_open.set(false);
+                                                    if let Err(error) = browser::save("wavelength-setup-complete", &true) {
+                                                        notice.set(error);
+                                                    }
+                                                }, "Skip setup" }
+                                                button { class: "solid-button", onclick: move |_| {
+                                                    setup_wizard_open.set(false);
+                                                    if let Err(error) = browser::save("wavelength-setup-complete", &true) {
+                                                        notice.set(error);
+                                                    }
+                                                }, "Finish setup" }
+                                            }
+                                        }
+                                    }
+                                }
+                                if profile_picture_open() {
+                                    div { class: "modal-backdrop profile-picture-backdrop",
+                                        div { class: "modal profile-picture-modal", role: "dialog", aria_modal: "true", aria_labelledby: "profile-picture-title",
+                                            button {
+                                                class: "modal-close",
+                                                aria_label: "Close profile picture picker",
+                                                onclick: move |_| profile_picture_open.set(false),
+                                                Icon { name: "close" }
+                                            }
+                                            div { class: "folder-modal-heading",
+                                                h2 { id: "profile-picture-title", "Profile picture" }
+                                                p { "Preview and choose the picture used in Wavelength." }
+                                            }
+                                            div { class: "profile-picture-preview",
+                                                if let Some(image) = local_avatar().or_else(|| {
+                                                    spotify_profile().and_then(|profile| {
+                                                        profile.images.into_iter().find_map(|image| {
+                                                            (!image.url.is_empty()).then_some(image.url)
+                                                        })
+                                                    })
+                                                }) {
+                                                    img { src: "{image}", alt: "Profile picture preview" }
+                                                } else {
+                                                    Icon { name: "user" }
+                                                }
+                                            }
+                                            div { class: "profile-picture-actions",
+                                                button { class: "solid-button", onclick: move |_| {
+                                                    spawn(async move {
+                                                        match browser::choose_avatar().await {
+                                                            Ok(Some(image)) => {
+                                                                local_avatar.set(Some(image.clone()));
+                                                                save_saved("wavelength-avatar", &Some(image), notice);
+                                                            }
+                                                            Ok(None) => {}
+                                                            Err(error) => notice.set(error),
+                                                        }
+                                                    });
+                                                }, "Upload picture" }
+                                                if spotify_profile().is_some_and(|profile| {
+                                                    profile.images.iter().any(|image| !image.url.is_empty())
+                                                }) {
+                                                    button { class: "outline-button", onclick: move |_| {
+                                                        local_avatar.set(None);
+                                                        save_saved("wavelength-avatar", &Option::<String>::None, notice);
+                                                        profile_picture_open.set(false);
+                                                    }, "Use Spotify picture" }
+                                                }
+                                                if local_avatar().is_some() {
+                                                    button { class: "text-button", onclick: move |_| {
+                                                        local_avatar.set(None);
+                                                        save_saved("wavelength-avatar", &Option::<String>::None, notice);
+                                                    }, "Remove picture" }
                                                 }
                                             }
                                         }

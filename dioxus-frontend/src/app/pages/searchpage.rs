@@ -49,7 +49,7 @@ pub(super) fn SearchPage(data: std::rc::Rc<PageData>) -> Element {
                                 rsx! {
                                     TrackRow {
                                         key: "{track.key()}-{index}", track,
-                                        context_menu_only: true,
+                                        context_menu_only: false,
                                         show_add_to_playlist: can_add_to_playlist,
                                         on_add_to_playlist: move |track| {
                                             if let Some(playlist_id) = playlist_id.as_deref() {

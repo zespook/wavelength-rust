@@ -25,6 +25,10 @@ extern "C" {
     fn set_appearance_js(theme: &str, accent: &str, background: &str) -> Result<bool, JsValue>;
     #[wasm_bindgen(catch, js_name = setFontScale)]
     fn set_font_scale_js(value: f64) -> Result<bool, JsValue>;
+    #[wasm_bindgen(catch, js_name = setInterfaceZoom)]
+    fn set_interface_zoom_js(value: f64) -> Result<bool, JsValue>;
+    #[wasm_bindgen(catch, js_name = getInterfaceZoom)]
+    fn get_interface_zoom_js() -> Result<f64, JsValue>;
     #[wasm_bindgen(catch, js_name = isDesktopWindow)]
     fn is_desktop_window_js() -> Result<bool, JsValue>;
     #[wasm_bindgen(catch, js_name = checkForUpdates)]
@@ -228,6 +232,14 @@ pub fn set_appearance(theme: &str, accent: &str, background: &str) -> Result<(),
 
 pub fn set_font_scale(value: f64) -> Result<(), String> {
     set_font_scale_js(value).map(|_| ()).map_err(error)
+}
+
+pub fn set_interface_zoom(value: f64) -> Result<(), String> {
+    set_interface_zoom_js(value).map(|_| ()).map_err(error)
+}
+
+pub async fn get_interface_zoom() -> Result<f64, String> {
+    get_interface_zoom_js().map_err(error)
 }
 
 pub fn is_desktop_window() -> Result<bool, String> {

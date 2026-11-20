@@ -185,6 +185,7 @@ pub(crate) fn Icon(name: &'static str) -> Element {
         "chevron-right" => "m9 18 6-6-6-6",
         "chevron-up" => "m18 15-6-6-6 6",
         "chevron-down" => "m6 9 6 6 6-6",
+        "minus" => "M5 12h14",
         "plus" => "M12 5v14M5 12h14",
         "arrow-right" => "M5 12h14m-7-7 7 7-7 7",
         "more" => "M5 12h.01M12 12h.01M19 12h.01",
