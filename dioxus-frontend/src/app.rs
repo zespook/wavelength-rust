@@ -2069,7 +2069,7 @@ pub(crate) fn App() -> Element {
                                             }
                                             "Spotify · {profile.display_name.as_deref().unwrap_or(&profile.id)}"
                                         }
-                                        label {
+                                        label { 
                                             input {
                                                 r#type: "radio",
                                                 name: "room-name-mode",

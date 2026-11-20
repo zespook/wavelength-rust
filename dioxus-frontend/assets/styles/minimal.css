@@ -1253,7 +1253,7 @@ svg {
 	font-size: calc(12px * var(--font-size-scale, 1));
 }
 
-.room-name-options label {
+.party-room-form .room-name-options label {
 	display: flex;
 	align-items: center;
 	gap: var(--space-2);
@@ -1527,7 +1527,7 @@ svg {
 	color: var(--muted);
 }
 
-.party-room-form input,
+.party-room-form input:not([type='radio']),
 .room-server-input,
 .custom-color-form input,
 .search-page-form,
@@ -2003,7 +2003,7 @@ svg {
 
 .recent-added-grid {
 	display: grid;
-	grid-template-columns: repeat(auto-fill, minmax(min(100%, 260px), 1fr));
+	grid-template-columns: repeat(3, minmax(0, 1fr));
 	gap: var(--space-3);
 }
 
@@ -2024,11 +2024,16 @@ svg {
 	display: flex;
 	align-items: center;
 	gap: var(--space-3);
+	width: 100%;
 	min-width: 0;
 	overflow: hidden;
 	padding: 0;
 	background: transparent;
 	text-align: left;
+}
+
+.recent-added-copy {
+	flex: 1;
 }
 
 .recent-added-copy strong,
